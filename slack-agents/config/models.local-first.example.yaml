@@ -1,0 +1,83 @@
+# Spokbot LOCAL-FIRST model profile (STAGED — not active)
+#
+# This is an example profile in the same schema as the production
+# slack-agents/config/models.yaml. It is NOT the live config and changes
+# nothing until an operator copies it into place on an instance (see
+# docs/LOCAL-FIRST-PROFILE.md for the activation steps and the full-day
+# proof protocol). No production instance runs this file today.
+#
+# Design (Spokbot architecture memo, Nov 12, 2026, section 4):
+#   quick — local first (unchanged from production; already local-first)
+#   smart — local mid-size model by default, cloud as configured escalation
+#   best  — cloud (unchanged; reserved for critical work)
+#
+# All local engines expose OpenAI-compatible HTTP and sit behind the
+# gateway / LiteLLM layer exactly like the production legs:
+#   Ollama      (default, zero-config)   http://127.0.0.1:11434/v1
+#   llama.cpp   (CPU/edge, GGUF)         http://127.0.0.1:8080/v1
+#   SGLang      (GPU profile, RadixAttention prefix caching)
+#   vLLM        (high-concurrency profile)
+# MIA recipes (Mia's AI Lab, mia-ai.net/models) are the certified catalog
+# for DGX Spark / RTX-class hardware; the Ollama/GGUF tier below is the
+# path for modest hardware (e.g. a 4 GB GTX 980 or a free-tier ARM VM
+# runs 3-8B models — pick model ids that fit your machine).
+#
+# Prefix caching: leave it ON in the local engine (llama.cpp slot cache /
+# --cache-reuse, SGLang RadixAttention is on by default, Ollama reuses the
+# loaded context). Agent calls share long persona/system prompts, so
+# prefix caching is worth more than raw tokens/sec here.
+# Speculative decoding (MTP / EAGLE-3) where the engine supports it:
+# 1.4-2x realistic single-user latency wins.
+
+tiers:
+  quick:
+    - id: macf-cheap
+      provider: litellm
+      description: "Local Ollama — free, fast, good for simple tasks"
+      cost_per_1m: 0
+    - id: openrouter/nvidia/nemotron-3.5-lightning:free
+      provider: openrouter
+      description: "Free fallback if local is down"
+      cost_per_1m: 0
+    - id: openrouter/liquid/lfm-2.5-2.6b:free
+      provider: openrouter
+      description: "Second free fallback — free tier flakes, try both"
+      cost_per_1m: 0
+
+  smart:
+    - id: macf-local-smart
+      provider: litellm
+      description: "LOCAL-FIRST smart tier: mid-size local model via gateway (Ollama/llama.cpp GGUF, e.g. a 7-14B instruct model sized to the host's hardware). Quality gate still applies: a local final answer finalizes only with executed tool work or a schema-valid deliverable."
+      cost_per_1m: 0
+    - id: macf-local
+      provider: litellm
+      description: "Second local leg: smaller local model (e.g. llama3.2:3b class) if the mid-size model is unavailable or too slow on this hardware."
+      cost_per_1m: 0
+    - id: macf-smart-free
+      provider: litellm
+      description: "Cloud escalation 1: free chain if both local legs fail."
+      cost_per_1m: 0
+    - id: macf-smart-paid
+      provider: litellm
+      description: "Cloud escalation 2 (last resort): paid smart chain via gateway. Credential lives only on the gateway."
+      cost_per_1m: 0.10
+
+  best:
+    - id: macf-best
+      provider: litellm
+      description: "Cloud — only when quality demands it (unchanged from production)"
+      cost_per_1m: 1.00
+
+# Global settings (same keys as production models.yaml)
+settings:
+  # How many times to retry a model that returns empty before falling back
+  empty_response_retries: 2
+  # Timeout per model attempt (ms)
+  model_timeout_ms: 60000
+  # Timeout per LOCAL model attempt (ms) — cold loads + CPU prompt
+  # evaluation need a bigger budget than cloud legs
+  local_timeout_ms: 150000
+  # If true, log every model selection and fallback to console.
+  # Keep ON during the full-day local-first proof: the routing log is
+  # the primary evidence for which tier served which call.
+  log_routing: true
