@@ -1,0 +1,651 @@
+{
+  "stories": [
+    {
+      "id": "US-101",
+      "title": "As the engine, I want every tool execution to issue a structured receipt, so that completion decisions never depend on an agent's prose",
+      "story_points": 8,
+      "acceptance_criteria": [
+        "Given an agent calls fileWrite successfully for task #702, When executeTool returns, Then a receipt exists with tool fileWrite, status ok, the task ID, and a file artifact whose sha256 matches the file on disk",
+        "Given an agent calls a tool name that does not exist, When executeTool returns, Then a receipt with status error and errorClass unknown_tool exists — the unknown-tool path issues receipts like every other path",
+        "Given a tool call fails, When the receipt is written, Then it records the classified errorClass and no artifact entries"
+      ],
+      "bdd_tests": [
+        "engine/features/us-101-receipts.feature"
+      ],
+      "tdd_tests": [
+        "engine/tests/receipts.test.js"
+      ],
+      "status": "in-progress",
+      "sprint_id": null,
+      "created_at": "2026-10-12T19:43:06.525Z",
+      "definition_of_done": {
+        "tests_pass": "All automated tests pass (BDD + TDD)",
+        "demo_link_works": "Demo artifact has a working clickable link",
+        "jesse_approved": "Jesse has approved the demo",
+        "no_regressions": "No existing functionality broken",
+        "documented": "Changes documented where applicable"
+      }
+    },
+    {
+      "id": "US-102",
+      "title": "As the CEO agent, I want to query what an agent actually did on a task, so that my standup reports effects, not claims",
+      "story_points": 3,
+      "acceptance_criteria": [
+        "Given receipts exist for task #702, When I call receiptsForTask(702), Then I receive the full ordered list of tool calls with statuses and artifacts, without reading any Slack message or deliverable text"
+      ],
+      "bdd_tests": [
+        "engine/features/us-102-receipt-queries.feature"
+      ],
+      "tdd_tests": [
+        "engine/tests/receipts.test.js"
+      ],
+      "status": "in-progress",
+      "sprint_id": null,
+      "created_at": "2026-10-12T19:43:06.528Z",
+      "definition_of_done": {
+        "tests_pass": "All automated tests pass (BDD + TDD)",
+        "demo_link_works": "Demo artifact has a working clickable link",
+        "jesse_approved": "Jesse has approved the demo",
+        "no_regressions": "No existing functionality broken",
+        "documented": "Changes documented where applicable"
+      }
+    },
+    {
+      "id": "US-103",
+      "title": "As Jesse (investor), I want a task to be markable done only when its postconditions verify against the real world, so that 'done' on my board always means the work observably happened",
+      "story_points": 8,
+      "acceptance_criteria": [
+        "Given task #702 has a contract requiring a fileWrite success and a file_exists postcondition, When the generation ends with confident prose but no file was written, Then the task does not transition to DONE, vikunja.completeTask is not called, and the task returns to WORKING with a structured verification failure",
+        "Given the same contract, When the file exists with the recorded hash and minimum size, Then the task transitions VERIFYING to DONE and vikunja.completeTask is called exactly once, from the completion module",
+        "Given a task attempts are exhausted, When verification still fails, Then the task transitions to BLOCKED, an engine gap is opened with the failing postconditions, and no success-shaped message is posted"
+      ],
+      "bdd_tests": [
+        "engine/features/us-103-verified-completion.feature"
+      ],
+      "tdd_tests": [
+        "engine/tests/completion.test.js",
+        "engine/tests/workEngine-completion.behavior.test.js"
+      ],
+      "status": "in-progress",
+      "sprint_id": null,
+      "created_at": "2026-10-12T19:43:06.528Z",
+      "definition_of_done": {
+        "tests_pass": "All automated tests pass (BDD + TDD)",
+        "demo_link_works": "Demo artifact has a working clickable link",
+        "jesse_approved": "Jesse has approved the demo",
+        "no_regressions": "No existing functionality broken",
+        "documented": "Changes documented where applicable"
+      }
+    },
+    {
+      "id": "US-104",
+      "title": "As a working agent, I want the engine to tell me mechanically which postcondition failed, so that my next attempt fixes the actual gap instead of re-reading my own prose",
+      "story_points": 3,
+      "acceptance_criteria": [
+        "Given verification failed on http_status for a contract URL, When the task returns to WORKING, Then the next cycle context includes the structured failure {type: http_status, url, expected: [200], observed: 404}, not a human-written critique"
+      ],
+      "bdd_tests": [
+        "engine/features/us-104-structured-failure-feedback.feature"
+      ],
+      "tdd_tests": [
+        "engine/tests/workEngine-completion.behavior.test.js"
+      ],
+      "status": "in-progress",
+      "sprint_id": null,
+      "created_at": "2026-10-12T19:43:06.533Z",
+      "definition_of_done": {
+        "tests_pass": "All automated tests pass (BDD + TDD)",
+        "demo_link_works": "Demo artifact has a working clickable link",
+        "jesse_approved": "Jesse has approved the demo",
+        "no_regressions": "No existing functionality broken",
+        "documented": "Changes documented where applicable"
+      }
+    },
+    {
+      "id": "US-105",
+      "title": "As the engine, I want contracted tasks to accept only schema-valid deliverables, so that tool-call syntax or narration in the final text is a failed attempt by construction",
+      "story_points": 5,
+      "acceptance_criteria": [
+        "Given task #702 contract specifies deliverable.schema research-report@v1, When the model final output is [fileRead(path=\"reports/x.md\")] as text (the original #702 output), Then the generation returns errorClass invalid_deliverable, the attempt is recorded as failed, and nothing is posted or relayed",
+        "Given the model returns JSON that fails the schema, When validation runs, Then the specific field errors are returned in validationErrors and the attempt fails without any text-pattern matching being consulted"
+      ],
+      "bdd_tests": [
+        "engine/features/us-105-typed-deliverables.feature"
+      ],
+      "tdd_tests": [
+        "engine/tests/deliverableSchemas.test.js",
+        "engine/tests/workEngine-completion.behavior.test.js"
+      ],
+      "status": "in-progress",
+      "sprint_id": null,
+      "created_at": "2026-10-12T19:43:06.542Z",
+      "definition_of_done": {
+        "tests_pass": "All automated tests pass (BDD + TDD)",
+        "demo_link_works": "Demo artifact has a working clickable link",
+        "jesse_approved": "Jesse has approved the demo",
+        "no_regressions": "No existing functionality broken",
+        "documented": "Changes documented where applicable"
+      }
+    },
+    {
+      "id": "US-106",
+      "title": "As a working agent, I want a wrong argument name to come back as a machine-readable correction, so that I can fix the call mechanically on the next round",
+      "story_points": 5,
+      "acceptance_criteria": [
+        "Given the agent calls urlCheck with {\"arg\": \"https://example.com\"} (the live Oct 12 incident), When executeTool validates, Then the tool function is not invoked, and the result is errorClass invalid_input with a correction naming missing: [\"url\"] and unknown: [\"arg\"]",
+        "Given the agent repeats the identical invalid call, When the loop sees the repeated violation, Then it short-circuits to a failed attempt instead of consuming further rounds"
+      ],
+      "bdd_tests": [
+        "engine/features/us-106-argument-corrections.feature"
+      ],
+      "tdd_tests": [
+        "engine/tests/agentTools-schema.test.js",
+        "engine/tests/generateWithTools.corrections.behavior.test.js"
+      ],
+      "status": "in-progress",
+      "sprint_id": null,
+      "created_at": "2026-10-12T19:43:06.549Z",
+      "definition_of_done": {
+        "tests_pass": "All automated tests pass (BDD + TDD)",
+        "demo_link_works": "Demo artifact has a working clickable link",
+        "jesse_approved": "Jesse has approved the demo",
+        "no_regressions": "No existing functionality broken",
+        "documented": "Changes documented where applicable"
+      }
+    },
+    {
+      "id": "US-107",
+      "title": "As the CEO agent, I want mechanical task shapes to run as code, so that fetching, checking, and filing happen identically every cycle with no model in the loop",
+      "story_points": 8,
+      "acceptance_criteria": [
+        "Given a task whose contract names executor url-sweep with three URLs, When the work cycle runs, Then all three URLs are checked via executeTool (three receipts exist) before any model call is made, and the model is invoked at most once, only to summarize observed differences",
+        "Given an executor generative step returns schema-invalid output, When the executor finishes, Then the mechanical receipts stand, the deliverable is marked failed, and the task is not completed"
+      ],
+      "bdd_tests": [
+        "engine/features/us-107-deterministic-executors.feature"
+      ],
+      "tdd_tests": [
+        "engine/tests/executors/urlSweep.test.js",
+        "engine/tests/executors/fileReport.test.js",
+        "engine/tests/executors/ticketFiler.test.js",
+        "engine/tests/executors/slackPoster.test.js"
+      ],
+      "status": "in-progress",
+      "sprint_id": null,
+      "created_at": "2026-10-12T19:43:06.555Z",
+      "definition_of_done": {
+        "tests_pass": "All automated tests pass (BDD + TDD)",
+        "demo_link_works": "Demo artifact has a working clickable link",
+        "jesse_approved": "Jesse has approved the demo",
+        "no_regressions": "No existing functionality broken",
+        "documented": "Changes documented where applicable"
+      }
+    },
+    {
+      "id": "US-108",
+      "title": "As Jesse (investor), I want every demo relayed to me to be backed by a receipt whose artifact still verifies, so that a link I click is a thing the engine itself made and just re-checked",
+      "story_points": 5,
+      "acceptance_criteria": [
+        "Given an agent posts prose containing a label, a URL-shaped string, and a task reference, but no artifact receipt exists for that task, When the sprint demo check runs, Then no [RELAY-DEMO] is emitted",
+        "Given a file artifact receipt exists but the file has been deleted since, When the relay drain re-verifies, Then the demo is not relayed and the stale receipt is flagged in telemetry"
+      ],
+      "bdd_tests": [
+        "engine/features/us-108-receipt-backed-demos.feature"
+      ],
+      "tdd_tests": [
+        "engine/tests/demoRelay-receipts.test.js"
+      ],
+      "status": "in-progress",
+      "sprint_id": null,
+      "created_at": "2026-10-12T19:43:06.561Z",
+      "definition_of_done": {
+        "tests_pass": "All automated tests pass (BDD + TDD)",
+        "demo_link_works": "Demo artifact has a working clickable link",
+        "jesse_approved": "Jesse has approved the demo",
+        "no_regressions": "No existing functionality broken",
+        "documented": "Changes documented where applicable"
+      }
+    },
+    {
+      "id": "US-109",
+      "title": "As the CEO agent, I want tool-usage telemetry computed from the receipts ledger, so that standup numbers describe recorded events rather than regex inferences",
+      "story_points": 3,
+      "acceptance_criteria": [
+        "Given 24 hours of receipts including failures, When summarize() runs, Then per-agent and per-class counts match the ledger exactly, and disabling every narration/text detector changes none of the counts"
+      ],
+      "bdd_tests": [
+        "engine/features/us-109-ledger-telemetry.feature"
+      ],
+      "tdd_tests": [
+        "engine/tests/receipts.test.js"
+      ],
+      "status": "in-progress",
+      "sprint_id": null,
+      "created_at": "2026-10-12T19:43:06.568Z",
+      "definition_of_done": {
+        "tests_pass": "All automated tests pass (BDD + TDD)",
+        "demo_link_works": "Demo artifact has a working clickable link",
+        "jesse_approved": "Jesse has approved the demo",
+        "no_regressions": "No existing functionality broken",
+        "documented": "Changes documented where applicable"
+      }
+    },
+    {
+      "id": "US-110",
+      "title": "As a business owner, I want the weekly content batch produced by the MACF team on the team's own schedule, so that Monday's drafts are the team's work and blockers surface the same day",
+      "story_points": 5,
+      "acceptance_criteria": [
+        "Given Monday 07:21 America/Denver, When the team content-batch timer fires, Then a directive is registered to the CCO, and a batch JSON exists in the agent sandbox and is posted to #content with no CEO authorship",
+        "Given Canva is unavailable, When the CCO produces the batch, Then every draft still ships with media from a free stock source (Pexels, Pixabay, or Unsplash) and the source is credited",
+        "Given a tool the CCO needs fails, When the run hits the failure, Then the blocker is posted in the directive thread in the same run and reaches the CEO via the standup relay",
+        "Given a run produces no deliverable, When intake finalizes it, Then it finalizes as failed, never as completed"
+      ],
+      "bdd_tests": [
+        "engine/features/us-110-weekly-content-batch.feature"
+      ],
+      "tdd_tests": [
+        "engine/tests/us-110-content-batch.test.js"
+      ],
+      "status": "in-progress",
+      "sprint_id": null,
+      "created_at": "2026-11-02T20:10:38.000Z",
+      "definition_of_done": {
+        "tests_pass": "All automated tests pass (BDD + TDD)",
+        "demo_link_works": "Demo artifact has a working clickable link",
+        "jesse_approved": "Jesse has approved the demo",
+        "no_regressions": "No existing functionality broken",
+        "documented": "Changes documented where applicable"
+      }
+    },
+    {
+      "id": "US-111",
+      "title": "As Jesse (investor/chairman), I want the MACF team to submit job applications itself through its own browser execution seat, so that submissions do not depend on the CEO's personal browser.",
+      "story_points": 13,
+      "acceptance_criteria": [
+        "Given a resume_ready candidate and a banked answer for every form question, When the submit timer runs, Then a submission is recorded in applications.jsonl with a portal confirmation reference and no CEO browser involved.",
+        "Given a question with no banked answer, When the form is reached, Then the run stops, logs the exact question as a blocker, and submits nothing."
+      ],
+      "bdd_tests": [
+        "engine/features/us-111-job-submission.feature"
+      ],
+      "tdd_tests": [
+        "engine/tests/job-submission-acceptance.test.js",
+        "engine/tests/job-submitter.test.js"
+      ],
+      "status": "in-progress",
+      "sprint_id": null,
+      "created_at": "2026-11-06T00:35:38.137Z",
+      "definition_of_done": {
+        "tests_pass": "All automated tests pass (BDD + TDD)",
+        "demo_link_works": "Demo artifact has a working clickable link",
+        "jesse_approved": "Jesse has approved the demo",
+        "no_regressions": "No existing functionality broken",
+        "documented": "Changes documented where applicable"
+      }
+    },
+    {
+      "id": "US-112",
+      "title": "As Jesse, I want the applications ledger to be append-only, so that recorded submissions can never be lost or silently reverted to an earlier stage.",
+      "story_points": 8,
+      "acceptance_criteria": [
+        "Given a recorded submission, When any prepare or rebuild process runs, Then the record remains and its stage never regresses.",
+        "Given a ledger write failure, When the write is attempted, Then the failure is loud in the run log and the prior ledger stays intact."
+      ],
+      "bdd_tests": [
+        "engine/features/us-112-append-only-ledger.feature"
+      ],
+      "tdd_tests": [
+        "engine/tests/job-submission-acceptance.test.js",
+        "engine/tests/job-pipeline.test.js"
+      ],
+      "status": "in-progress",
+      "sprint_id": null,
+      "created_at": "2026-11-06T00:35:38.137Z",
+      "definition_of_done": {
+        "tests_pass": "All automated tests pass (BDD + TDD)",
+        "demo_link_works": "Demo artifact has a working clickable link",
+        "jesse_approved": "Jesse has approved the demo",
+        "no_regressions": "No existing functionality broken",
+        "documented": "Changes documented where applicable"
+      }
+    },
+    {
+      "id": "US-113",
+      "title": "As Jesse, I want approved social content to publish as live posts, so that content work produces visible outcomes and not only drafts.",
+      "story_points": 8,
+      "acceptance_criteria": [
+        "Given Jesse approves a draft from a batch that passed the team review loop, When the publish step runs, Then the post is live and its URL is recorded in published-posts.jsonl.",
+        "Given no approval, When the publish step runs, Then nothing publishes."
+      ],
+      "bdd_tests": [
+        "engine/features/us-113-social-publishing.feature"
+      ],
+      "tdd_tests": [
+        "engine/tests/us-113-social-publishing.test.js"
+      ],
+      "status": "in-progress",
+      "sprint_id": null,
+      "created_at": "2026-11-06T00:35:38.137Z",
+      "definition_of_done": {
+        "tests_pass": "All automated tests pass (BDD + TDD)",
+        "demo_link_works": "Demo artifact has a working clickable link",
+        "jesse_approved": "Jesse has approved the demo",
+        "no_regressions": "No existing functionality broken",
+        "documented": "Changes documented where applicable"
+      }
+    },
+    {
+      "id": "US-114",
+      "title": "As Jesse, I want SEO recommendations turned into changed pages on staynalive.com, so that SEO counts as action, not just knowledge.",
+      "story_points": 8,
+      "acceptance_criteria": [
+        "Given an approved SEO change, When the runner executes it, Then the page content differs at its URL, the change verifies on re-audit, and the change is recorded on its ticket with the URL."
+      ],
+      "bdd_tests": [
+        "engine/features/us-114-seo-changes.feature"
+      ],
+      "tdd_tests": [
+        "engine/tests/us-114-seo-changes.test.js"
+      ],
+      "status": "in-progress",
+      "sprint_id": null,
+      "created_at": "2026-11-06T00:35:38.137Z",
+      "definition_of_done": {
+        "tests_pass": "All automated tests pass (BDD + TDD)",
+        "demo_link_works": "Demo artifact has a working clickable link",
+        "jesse_approved": "Jesse has approved the demo",
+        "no_regressions": "No existing functionality broken",
+        "documented": "Changes documented where applicable"
+      }
+    },
+    {
+      "id": "US-115",
+      "title": "As Jesse, I want client deliverables counted only when actually sent, so that drafts are never reported as deliveries.",
+      "story_points": 3,
+      "acceptance_criteria": [
+        "Given a completed proposal package, When the outcome audit reports deliverables, Then a package counts only with a send reference recorded in deliveries.jsonl."
+      ],
+      "bdd_tests": [
+        "engine/features/us-115-deliverables-counted-when-sent.feature"
+      ],
+      "tdd_tests": [
+        "engine/tests/outcome-audit.test.js"
+      ],
+      "status": "in-progress",
+      "sprint_id": null,
+      "created_at": "2026-11-06T00:35:38.137Z",
+      "definition_of_done": {
+        "tests_pass": "All automated tests pass (BDD + TDD)",
+        "demo_link_works": "Demo artifact has a working clickable link",
+        "jesse_approved": "Jesse has approved the demo",
+        "no_regressions": "No existing functionality broken",
+        "documented": "Changes documented where applicable"
+      }
+    },
+    {
+      "id": "US-116",
+      "title": "As the CEO, I want every MCP baseline server verified daily in the engine's own runtime context, so that a server cannot be fixed in one context and broken in the one the team uses.",
+      "story_points": 8,
+      "acceptance_criteria": [
+        "Given the daily capability audit runs, When it probes each baseline server, Then the probe executes with the engine's HOME and grants configuration, and any failure opens or updates a ticket the same day."
+      ],
+      "bdd_tests": [
+        "engine/features/us-116-capability-audit.feature"
+      ],
+      "tdd_tests": [
+        "engine/tests/us-116-capability-audit.test.js"
+      ],
+      "status": "in-progress",
+      "sprint_id": null,
+      "created_at": "2026-11-06T00:35:38.137Z",
+      "definition_of_done": {
+        "tests_pass": "All automated tests pass (BDD + TDD)",
+        "demo_link_works": "Demo artifact has a working clickable link",
+        "jesse_approved": "Jesse has approved the demo",
+        "no_regressions": "No existing functionality broken",
+        "documented": "Changes documented where applicable"
+      }
+    },
+    {
+      "id": "US-117",
+      "title": "As the CEO, I want the directive dead-letter store inspected daily, so that no directive dies silently.",
+      "story_points": 5,
+      "acceptance_criteria": [
+        "Given an entry lands in the dead-letter store, When the daily check runs, Then the CEO is notified with the directive text and reason, and the directive is re-posted correctly or closed with a stated reason."
+      ],
+      "bdd_tests": [
+        "engine/features/us-117-dead-letter-inspection.feature"
+      ],
+      "tdd_tests": [
+        "engine/tests/us-117-dead-letter.test.js"
+      ],
+      "status": "in-progress",
+      "sprint_id": null,
+      "created_at": "2026-11-06T00:35:38.137Z",
+      "definition_of_done": {
+        "tests_pass": "All automated tests pass (BDD + TDD)",
+        "demo_link_works": "Demo artifact has a working clickable link",
+        "jesse_approved": "Jesse has approved the demo",
+        "no_regressions": "No existing functionality broken",
+        "documented": "Changes documented where applicable"
+      }
+    },
+    {
+      "id": "US-118",
+      "title": "As Jesse, I want every recurring team function to exist as a story in the planning system before it runs, so that no work is invisible to the team or to me.",
+      "story_points": 5,
+      "acceptance_criteria": [
+        "Given a recurring team function (content, SEO, finance, concierge, outreach, jobs), When the story registry is audited, Then a story with acceptance criteria and a difficulty score exists for it."
+      ],
+      "bdd_tests": [
+        "engine/features/us-118-story-registry.feature"
+      ],
+      "tdd_tests": [
+        "engine/tests/job-submission-acceptance.test.js"
+      ],
+      "status": "in-progress",
+      "sprint_id": null,
+      "created_at": "2026-11-06T00:35:38.137Z",
+      "definition_of_done": {
+        "tests_pass": "All automated tests pass (BDD + TDD)",
+        "demo_link_works": "Demo artifact has a working clickable link",
+        "jesse_approved": "Jesse has approved the demo",
+        "no_regressions": "No existing functionality broken",
+        "documented": "Changes documented where applicable"
+      }
+    },
+    {
+      "id": "US-119",
+      "title": "As Jesse, I want the CFO to run a daily finance snapshot and land every newly discovered expense in my budget sheet in the same pass, so that revenue operations reflect real money movement, not plans.",
+      "story_points": 5,
+      "acceptance_criteria": [
+        "Given a new expense appears in any linked account, When the CFO finance pass runs, Then the expense is recorded once in the budget sheet the same day and the daily snapshot totals reconcile with the account feeds."
+      ],
+      "bdd_tests": [
+        "engine/features/us-119-finance-snapshot.feature"
+      ],
+      "tdd_tests": [
+        "engine/tests/us-119-finance-snapshot.test.js"
+      ],
+      "status": "in-progress",
+      "sprint_id": null,
+      "created_at": "2026-11-06T03:27:51.000Z",
+      "definition_of_done": {
+        "tests_pass": "All automated tests pass (BDD + TDD)",
+        "demo_link_works": "Demo artifact has a working clickable link",
+        "jesse_approved": "Jesse has approved the demo",
+        "no_regressions": "No existing functionality broken",
+        "documented": "Changes documented where applicable"
+      }
+    },
+    {
+      "id": "US-120",
+      "title": "As Jesse, I want AI audit outreach batches sent on schedule with replies watched continuously and follow-ups drafted for my one-click review, so that the 50 AI Readiness Audit pipeline produces conversations, not silence.",
+      "story_points": 5,
+      "acceptance_criteria": [
+        "Given an outreach batch is due, When the CRO sends it, Then sends are receipted, replies are polled at least hourly, and every reply produces either an auto-sent one-pager per the rules or a draft awaiting my review."
+      ],
+      "bdd_tests": [],
+      "tdd_tests": [],
+      "status": "in-progress",
+      "sprint_id": null,
+      "created_at": "2026-11-06T03:27:51.000Z",
+      "definition_of_done": {
+        "tests_pass": "All automated tests pass (BDD + TDD)",
+        "demo_link_works": "Demo artifact has a working clickable link",
+        "jesse_approved": "Jesse has approved the demo",
+        "no_regressions": "No existing functionality broken",
+        "documented": "Changes documented where applicable"
+      }
+    },
+    {
+      "id": "US-121",
+      "title": "As Jesse, I want my Facebook, Instagram, LinkedIn, and Threads messages watched and real messages triaged with drafts in my voice for my approval, so that no genuine message waits unanswered and nothing sends without my go-ahead.",
+      "story_points": 5,
+      "acceptance_criteria": [
+        "Given a new genuine DM arrives on any watched channel, When the concierge poll runs, Then it is triaged and a draft reply in my voice exists for my approval, and no message is ever sent autonomously."
+      ],
+      "bdd_tests": [],
+      "tdd_tests": [],
+      "status": "in-progress",
+      "sprint_id": null,
+      "created_at": "2026-11-06T03:27:51.000Z",
+      "definition_of_done": {
+        "tests_pass": "All automated tests pass (BDD + TDD)",
+        "demo_link_works": "Demo artifact has a working clickable link",
+        "jesse_approved": "Jesse has approved the demo",
+        "no_regressions": "No existing functionality broken",
+        "documented": "Changes documented where applicable"
+      }
+    },
+    {
+      "id": "US-122",
+      "title": "As Jesse, I want every agent to produce visible demos that are relayed to me after the agent demos to the CEO, so that silence from any agent is treated as breakage, not as a quiet week.",
+      "story_points": 3,
+      "acceptance_criteria": [
+        "Given an agent completes demonstrable work, When the hourly demo check runs, Then a qualifying demo (label, link, task reference) is relayed to me, and an agent with no qualifying demo in the window is flagged by name."
+      ],
+      "bdd_tests": [
+        "engine/features/us-122-demo-relay.feature"
+      ],
+      "tdd_tests": [
+        "engine/tests/us-122-demo-relay.test.js"
+      ],
+      "status": "in-progress",
+      "sprint_id": null,
+      "created_at": "2026-11-06T03:27:51.000Z",
+      "definition_of_done": {
+        "tests_pass": "All automated tests pass (BDD + TDD)",
+        "demo_link_works": "Demo artifact has a working clickable link",
+        "jesse_approved": "Jesse has approved the demo",
+        "no_regressions": "No existing functionality broken",
+        "documented": "Changes documented where applicable"
+      }
+    },
+    {
+      "id": "US-123",
+      "title": "As Jesse, I want the engine, Vikunja, gateway, and n8n kept up by a watchdog that auto-restores known failure classes, so that health means workflows actually execute, not that a heartbeat is fresh.",
+      "story_points": 8,
+      "acceptance_criteria": [
+        "Given a known failure class occurs (MCP binary loss, user wipe, permission reset, gateway empty-200 stall), When the watchdog runs, Then the service is restored automatically and a workflow task run completing afterwards proves execution, not just process liveness."
+      ],
+      "bdd_tests": [
+        "engine/features/us-123-watchdog-liveness.feature"
+      ],
+      "tdd_tests": [
+        "engine/tests/us-123-watchdog-liveness.test.js"
+      ],
+      "status": "in-progress",
+      "sprint_id": null,
+      "created_at": "2026-11-06T03:27:51.000Z",
+      "definition_of_done": {
+        "tests_pass": "All automated tests pass (BDD + TDD)",
+        "demo_link_works": "Demo artifact has a working clickable link",
+        "jesse_approved": "Jesse has approved the demo",
+        "no_regressions": "No existing functionality broken",
+        "documented": "Changes documented where applicable"
+      }
+    },
+    {
+      "id": "US-FW-018",
+      "title": "As a Spokbot operator, I want Vikunja supervised by a watchdog that restarts it with setsid and never kills itself, so that the team's board survives session teardown and never dies silently",
+      "story_points": 3,
+      "acceptance_criteria": [
+        "Given Vikunja is not responding on 127.0.0.1:3456, When the watchdog runs its liveness probe, Then it detects the failure, kills any stale Vikunja process with an anchored pkill, and relaunches it via start.sh so it responds within 10 seconds",
+        "Given Vikunja was started by start.sh, When the parent exec session terminates, Then Vikunja continues running and still responds on 127.0.0.1:3456 (the setsid invariant)",
+        "Given Vikunja is responding, When the watchdog probes, Then it does not kill or restart it, and start.sh exits 0 immediately (idempotent, probe-first)",
+        "Given the watchdog executes the restart sequence, When it runs pkill, Then the pattern is anchored with ^ and the watchdog's own process is not matched"
+      ],
+      "bdd_tests": [
+        "engine/vikunja-supervision.feature"
+      ],
+      "tdd_tests": [
+        "engine/tests/vikunja-supervision.test.js"
+      ],
+      "status": "in-progress",
+      "sprint_id": null,
+      "created_at": "2026-11-18T00:00:00.000Z",
+      "definition_of_done": {
+        "tests_pass": "All automated tests pass (BDD + TDD)",
+        "demo_link_works": "Demo artifact has a working clickable link",
+        "jesse_approved": "Jesse has approved the demo",
+        "no_regressions": "No existing functionality broken",
+        "documented": "Changes documented where applicable"
+      }
+    },
+    {
+      "id": "US-FW-025",
+      "title": "As a Spokbot operator, I want the autonomous driver verifiably scheduled, so that a working driver script with no schedule is detected as a critical defect instead of agents going silent",
+      "story_points": 3,
+      "acceptance_criteria": [
+        "Given the schedules manifest, When it is validated, Then autonomous-agent-driver is declared with id, cadence, command, owner, and purpose, and no schedule id is duplicated",
+        "Given the driver script exists but the autonomous-agent-driver schedule is absent from the runtime, When check-schedules runs, Then it reports the driver MISSING and CRITICAL and exits 1; given the schedule present, Then it reports OK and exits 0",
+        "Given every agent in the roster, When the autonomous interface is checked, Then each agent exposes runAutonomous() and the CFO's run produces its dashboard artifact"
+      ],
+      "bdd_tests": [
+        "engine/autonomous-schedule.feature"
+      ],
+      "tdd_tests": [
+        "engine/tests/autonomous-agent.test.js",
+        "engine/tests/schedule-manifest.test.js"
+      ],
+      "status": "in-progress",
+      "sprint_id": null,
+      "created_at": "2026-11-18T00:00:00.000Z",
+      "definition_of_done": {
+        "tests_pass": "All automated tests pass (BDD + TDD)",
+        "demo_link_works": "Demo artifact has a working clickable link",
+        "jesse_approved": "Jesse has approved the demo",
+        "no_regressions": "No existing functionality broken",
+        "documented": "Changes documented where applicable"
+      }
+    },
+    {
+      "id": "US-FW-031",
+      "title": "As the CEO of the Spokbot team, I want requirements broken down into assigned user stories by the PM, so that a content or visual requirement becomes platform-sized stories with acceptance criteria on the board instead of one vague ask",
+      "story_points": 3,
+      "acceptance_criteria": [
+        "Given the CEO sends a content requirement via ceoToPm spanning X, Facebook, and TikTok, When the PM processes it, Then it produces one user story per platform, each with acceptance criteria, assigned to the CMO, written to Vikunja as subtasks",
+        "Given a visual requirement, When the PM processes it, Then it produces feed and stories stories specifying dimensions and style, assigned to the CUXO",
+        "Given a requirement with missing acceptance criteria, When the PM processes it, Then it identifies the gaps, posts clarifying questions to the CEO, and creates no stories until the CEO responds"
+      ],
+      "bdd_tests": [
+        "engine/pm-breakdown.feature"
+      ],
+      "tdd_tests": [
+        "engine/tests/pm-breakdown.test.js"
+      ],
+      "status": "in-progress",
+      "sprint_id": null,
+      "created_at": "2026-11-18T00:00:00.000Z",
+      "definition_of_done": {
+        "tests_pass": "All automated tests pass (BDD + TDD)",
+        "demo_link_works": "Demo artifact has a working clickable link",
+        "jesse_approved": "Jesse has approved the demo",
+        "no_regressions": "No existing functionality broken",
+        "documented": "Changes documented where applicable"
+      }
+    }
+  ],
+  "nextId": 124
+}

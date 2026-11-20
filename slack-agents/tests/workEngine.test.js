@@ -15,7 +15,10 @@ describe('task classification', () => {
 
   test('isJesseGated matches needs-Jesse markers, never dormant tasks', () => {
     expect(we.isJesseGated({ title: 'JESSE ACTION — connect Instagram' })).toBe(true);
-    expect(we.isJesseGated({ title: 'Thing', description: 'needs Jesse approval' })).toBe(true);
+    // M3 (#771): description prose mentioning an approval step no longer
+    // gates — only a bracketed tag does (the broad rule deadlocked #82/#122).
+    expect(we.isJesseGated({ title: 'Thing', description: '[needs jesse] connect the account' })).toBe(true);
+    expect(we.isJesseGated({ title: 'Thing', description: 'needs Jesse approval' })).toBe(false);
     expect(we.isJesseGated({ title: 'Post — HELD under HOLD-001' })).toBe(false);
     expect(we.isJesseGated({ title: 'Regular research task' })).toBe(false);
   });

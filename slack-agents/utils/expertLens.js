@@ -9,16 +9,17 @@
 
 const fs = require('fs');
 const path = require('path');
-
-const SKILLS_DIR = path.join(__dirname, '..', '..', 'macf', 'team-skills');
-// Fallback for when the relative path doesn't resolve (e.g. different cwd)
-const SKILLS_DIR_ABS = '/home/hatch/workspace/macf/team-skills';
+const instancePaths = require('./instancePaths');
 
 const cache = {};
 
 function skillsDir() {
-  if (fs.existsSync(SKILLS_DIR)) return SKILLS_DIR;
-  return SKILLS_DIR_ABS;
+  // US-FW-001: team-skills is instance persona content, resolved via
+  // SPOKBOT_INSTANCE_DIR (split layout personas/team-skills preferred,
+  // unsplit layout falls back). SPOKBOT_LEGACY_SKILLS_DIR remains as an
+  // explicit escape hatch for pre-parameterization checkouts.
+  if (process.env.SPOKBOT_LEGACY_SKILLS_DIR) return process.env.SPOKBOT_LEGACY_SKILLS_DIR;
+  return instancePaths.personasPath('team-skills');
 }
 
 function loadLens(slug) {

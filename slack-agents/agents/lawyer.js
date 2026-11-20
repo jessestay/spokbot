@@ -9,7 +9,7 @@ const { AGENTS, CHANNELS } = require('../config');
 const state = require('../utils/state');
 const { generateReport, generateWithTools } = require('../utils/anthropic');
 const { resolveChannel: _resolveChannel } = require('../utils/channels');
-const { relay, stripDelegations } = require('../utils/delegation');
+const { relay, stripDelegations, delegationFailure } = require('../utils/delegation');
 
 const AGENT = AGENTS.lawyer;
 const AGENT_ID = AGENT.id; // 'lawyer'
@@ -50,7 +50,7 @@ Monthly legal checkup for Jesse Stay — ${new Date().toLocaleDateString('en-US'
 
 Jesse's business context:
 - transkrybe.com: SaaS music transcription product (collecting user audio/data)
-- MultiAgentCommsFramework (MACF): proprietary software framework he's building
+- Spokbot (formerly MultiAgentCommsFramework / MACF): open-source software framework he's building
 - Self-employed/founder with social media consulting history
 - Exploring executive employment (reviewing offer letters, NDAs)
 
@@ -124,11 +124,18 @@ Flag HIGH RISK items with "🔴". Note this is guidance, not representation.
 
   // TOOL EXECUTION (Oct 9, 2026): Lawyer now has tools — can check URLs, read
   // files when reviewing contracts or researching legal matters.
-  const { response, toolResults, toolsUsed } = await generateWithTools({
+  const { response, toolResults, toolsUsed, ok, errorClass } = await generateWithTools({
     systemPrompt: AGENT.systemPrompt,
     context,
     maxTokens: 2000,
+    agentId: AGENT_ID,
   });
+    // CEO BUILD (Oct 22, 2026): honor the generateWithTools failure contract.
+  // A failed run (ok === false / null response) is a FAILED delegation —
+  // never a completed one with an empty body (audit F1).
+  if (ok === false || response == null) {
+    return delegationFailure({ errorClass, agentId: AGENT_ID, threadTs, channel: AGENT.primaryChannel });
+  }
   const subResults = await relay(response, AGENT_ID, visitedAgents, channelId);
 
   // POLLER IS SOLE POSTER (Oct 4, 2026 — architectural fix):

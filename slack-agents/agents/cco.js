@@ -9,7 +9,7 @@ const { AGENTS, CHANNELS } = require('../config');
 const state = require('../utils/state');
 const { generateReport, generateProactivePost, generateWithTools } = require('../utils/anthropic');
 const { resolveChannel: _resolveChannel } = require('../utils/channels');
-const { relay, stripDelegations } = require('../utils/delegation');
+const { relay, stripDelegations, delegationFailure } = require('../utils/delegation');
 const { invokeTool } = require('../engine/mcpClient');
 const { postToX } = require('../engine/publisher');
 
@@ -233,11 +233,33 @@ async function handleDelegation(messageText, visitedAgents = new Set(), channelI
   const context = `Delegation request from ${fromAgent}:\n"${request}"\n\n${lensContext ? `EXPERT GUIDANCE (follow this when writing):\n${lensContext}\n\n` : ''}${toolResult ? `Tool result:\n${JSON.stringify(toolResult).slice(0, 1000)}\n\n` : ''}Respond as Chief Content Officer. Draft requested content or answer the content question. Mark all drafts with "✅ Awaiting Jesse's approval".${toolResult ? ' Include specific findings from the tool result.' : ''}`;
   // TOOL EXECUTION (Oct 9, 2026): CCO now has local tools — can check URLs,
   // write draft files, build content artifacts alongside the MCP pre-pass.
-  const { response, toolResults, toolsUsed } = await generateWithTools({
+  // ROUND BUDGET (#925 round 4): the generateWithTools default budget
+  // (6 rounds) starves multi-step directives - the weekly content batch
+  // spent it on required reading + research and never reached a
+  // fileWrite. A directive may declare its budget in its MACF-CONTRACT
+  // params (taskContract.directiveToolRounds reads raw or Slack-escaped
+  // text); the weekly content batch falls back to 16 when its directive
+  // carries no value (e.g. retries of directives posted before round 4).
+  let maxToolRounds;
+  try {
+    const { directiveToolRounds } = require('../engine/taskContract');
+    maxToolRounds = directiveToolRounds(request);
+  } catch { /* budget resolution must never break a delegation */ }
+  if (maxToolRounds == null && /WEEKLY CONTENT BATCH/i.test(request)) maxToolRounds = 16;
+  if (maxToolRounds != null) console.log(`[cco] tool-round budget for this directive: ${maxToolRounds}`);
+  const { response, toolResults, toolsUsed, ok, errorClass } = await generateWithTools({
     systemPrompt: AGENT.systemPrompt,
     context,
     maxTokens: 2000,
+    ...(maxToolRounds != null ? { maxToolRounds } : {}),
+    agentId: AGENT_ID,
   });
+    // CEO BUILD (Oct 22, 2026): honor the generateWithTools failure contract.
+  // A failed run (ok === false / null response) is a FAILED delegation —
+  // never a completed one with an empty body (audit F1).
+  if (ok === false || response == null) {
+    return delegationFailure({ errorClass, agentId: AGENT_ID, threadTs, channel: AGENT.primaryChannel });
+  }
   const subResults = await relay(response, AGENT_ID, visitedAgents, channelId);
 
   // POLLER IS SOLE POSTER (Oct 4, 2026 — architectural fix):

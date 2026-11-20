@@ -25,6 +25,9 @@ jest.mock('../engine/lock', () => ({
 }));
 jest.mock('../utils/anthropic', () => ({
   generateReport: jest.fn(),
+  // Since #724 the contracted work path runs through generateWithTools with
+  // a typed deliverable; generateReport is no longer the work seam.
+  generateWithTools: jest.fn(),
   // New since the original tests: runCycle checks this before doing any LLM
   // task work. Defaults to configured so the original contracts hold.
   isConfigured: jest.fn(() => true),
@@ -37,10 +40,16 @@ jest.mock('../utils/state', () => ({
   push: jest.fn(),
 }));
 
+const { ensureContract } = require('../engine/taskContract');
+// Since #724 Phase 3, workTask fail-closes on any task without a
+// MACF-CONTRACT block. Board fixtures that are meant to be WORKED must
+// therefore carry a contract — an uncontracted fixture now proves the
+// opposite of what these lock tests intend.
+const CONTRACTED = ensureContract('Fixture task details.');
 const we = require('../engine/workEngine');
 const lock = require('../engine/lock');
 const vikunja = require('../utils/vikunja');
-const { generateReport, isConfigured } = require('../utils/anthropic');
+const { generateReport, generateWithTools, isConfigured } = require('../utils/anthropic');
 
 const LOCK_TITLE = '🔒 ENGINE LOCK — do not complete';
 
@@ -72,6 +81,10 @@ beforeEach(() => {
   lock.acquireLock.mockReset().mockResolvedValue(true);
   lock.releaseLock.mockReset().mockResolvedValue(undefined);
   generateReport.mockReset().mockResolvedValue(null);
+  generateWithTools.mockReset().mockResolvedValue({
+    response: JSON.stringify({ status: 'produced', summary: 'Launch post drafted.', artifactRefs: [] }),
+    toolResults: [], ok: true,
+  });
   // Reset (not just clear): re-arm the default "LLM configured" behavior so
   // the original work-the-board contracts hold unless a test opts out.
   isConfigured.mockReset().mockReturnValue(true);
@@ -114,7 +127,7 @@ describe('runCycle single-instance lock', () => {
   });
 
   test('proceeds to work the board when the lock is acquired', async () => {
-    const board = [{ id: 8, title: 'Write the launch post', description: '', done: false, priority: 1 }];
+    const board = [{ id: 8, title: 'Write the launch post', description: CONTRACTED, done: false, priority: 1 }];
     mockFetch(async (url) => {
       if (/\/projects\/2\/tasks/.test(url)) return okJson(board);
       return okJson({});
@@ -124,8 +137,8 @@ describe('runCycle single-instance lock', () => {
 
     expect(lock.acquireLock).toHaveBeenCalledTimes(1);
     // The top actionable task was actually worked (deliverable generated).
-    expect(generateReport).toHaveBeenCalledTimes(1);
-    expect(generateReport.mock.calls[0][0].context).toMatch('Write the launch post');
+    expect(generateWithTools).toHaveBeenCalledTimes(1);
+    expect(generateWithTools.mock.calls[0][0].context).toMatch('Write the launch post');
   });
 
   test('never tries to work the lock task itself', async () => {
@@ -137,7 +150,7 @@ describe('runCycle single-instance lock', () => {
         done: false,
         priority: 5, // highest priority — must STILL be skipped
       },
-      { id: 8, title: 'Write the launch post', description: '', done: false, priority: 1 },
+      { id: 8, title: 'Write the launch post', description: CONTRACTED, done: false, priority: 1 },
     ];
     mockFetch(async (url) => {
       if (/\/projects\/2\/tasks/.test(url)) return okJson(board);
@@ -147,8 +160,8 @@ describe('runCycle single-instance lock', () => {
     await we.runCycle();
 
     // Exactly one task worked, and it is the real task — not the lock.
-    expect(generateReport).toHaveBeenCalledTimes(1);
-    const context = generateReport.mock.calls[0][0].context;
+    expect(generateWithTools).toHaveBeenCalledTimes(1);
+    const context = generateWithTools.mock.calls[0][0].context;
     expect(context).toMatch('Write the launch post');
     expect(context).not.toMatch(/ENGINE LOCK/);
   });
@@ -170,8 +183,13 @@ describe('runCycle single-instance lock', () => {
 
     await we.runCycle();
 
-    // Nothing actionable -> idle path; with generateReport mocked to null it
-    // returns before posting. The lock task itself must never be worked.
+    // Nothing actionable -> the lock task itself must never be worked.
+    // (generateReport MAY be called once by the idle-proposal path — that
+    // is the engine inventing new work on an empty board, not working the
+    // lock task, and its context must not mention the lock either.)
+    for (const call of generateWithTools.mock.calls) {
+      expect(call[0].context || '').not.toMatch(/ENGINE LOCK/);
+    }
     for (const call of generateReport.mock.calls) {
       expect(call[0].context || '').not.toMatch(/ENGINE LOCK/);
     }
@@ -183,7 +201,9 @@ describe('runCycle single-instance lock', () => {
     fakeClient.conversations.open.mockResolvedValue({ channel: { id: 'D123' } });
     fakeClient.chat.postMessage.mockResolvedValue({ ok: true, ts: '1' });
     const board = [
-      { id: 9, title: 'Renew domain — JESSE ACTION required', description: '', done: false, priority: 4 },
+      // M3 (#771): the gate marker must LEAD the title (or be a bracketed
+      // description tag) — a trailing marker no longer gates.
+      { id: 9, title: 'JESSE ACTION — Renew domain', description: '', done: false, priority: 4 },
       { id: 8, title: 'Write the launch post', description: '', done: false, priority: 1 },
     ];
     mockFetch(async (url) => {

@@ -14,21 +14,22 @@ const path = require('path');
 // /tmp is ephemeral and gets cleared on restart, which resets all cooldown
 // state and causes tasks to be re-worked every cycle. The VM engine needs
 // persistence across restarts.
-const MACF_HOME_STATE = '/home/macf/workspace/macf/slack-agents/.state';
-const STATE_DIR = process.env.RAILWAY_VOLUME_MOUNT_PATH ||
-  process.env.MACF_STATE_DIR ||
-  // ROOT-CAUSE FIX (Oct 12, 2026): the live engine runs as user macf
-  // (HOME=/home/macf), but root cron jobs (standup, sprint-demo-check,
-  // self-healer) resolve HOME=/home/hatch — producing a split-brain where
-  // cron scripts read an empty decoy state file while the engine wrote the
-  // real state elsewhere. Consequence: sprintDemo read zero lastDemo keys
-  // and escalated a false engine_demo_drought 3x, and the relay-queue drain
-  // read/drained the wrong queue (4 real deliverables never relayed).
-  // When the macf live-state dir exists, it is canonical for EVERY user —
-  // env overrides still win, HOME-based fallback only when macf's dir is
-  // absent (e.g. pure local dev without the engine installed).
-  (fs.existsSync(MACF_HOME_STATE) ? MACF_HOME_STATE :
-    path.join(process.env.HOME || '/home/hatch', 'workspace', 'macf', 'slack-agents', '.state'));
+//
+// ROOT-CAUSE FIX (Oct 12, 2026): the live engine and root cron jobs
+// (standup, sprint-demo-check, self-healer) ran as different users with
+// different HOMEs, and a HOME-based state path produced a split-brain:
+// cron scripts read an empty decoy state file while the engine wrote
+// the real state elsewhere. Consequence: sprintDemo read zero lastDemo
+// keys and escalated a false engine_demo_drought 3x, and the relay-queue
+// drain read/drained the wrong queue (4 real deliverables never relayed).
+//
+// US-FW-002 (Nov 17, 2026): resolution now lives in ONE place —
+// utils/instancePaths.js resolvedStateDir(). Legacy env overrides
+// (RAILWAY_VOLUME_MOUNT_PATH, MACF_STATE_DIR) still win, then
+// SPOKBOT_STATE_DIR, then the checkout's own .state — anchored to the
+// tree itself, identical for every user, no per-user fallback.
+const { resolvedStateDir } = require('./instancePaths');
+const STATE_DIR = resolvedStateDir();
 
 // ─── Per-agent default state shapes ──────────────────────────────────────────
 const DEFAULT_STATE = {

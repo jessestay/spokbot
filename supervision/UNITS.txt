@@ -1,0 +1,16 @@
+MACF server supervision units (installed 2026-10-21T14:06:18Z)
+macf-sup-standup.service / macf-sup-standup.timer
+macf-sup-demo-check.service / macf-sup-demo-check.timer
+macf-sup-delivery-learner.service / macf-sup-delivery-learner.timer
+macf-sup-autonomous-driver.service / macf-sup-autonomous-driver.timer
+macf-sup-improvement-loop.service / macf-sup-improvement-loop.timer
+macf-sup-sprint-planning.service / macf-sup-sprint-planning.timer
+macf-sup-sprint-review.service / macf-sup-sprint-review.timer
+macf-sup-release-planning.service / macf-sup-release-planning.timer
+macf-sup-resilience-watch.service / macf-sup-resilience-watch.timer
+macf-sup-task69-watch.service / macf-sup-task69-watch.timer
+macf-sup-directive-watch.service / macf-sup-directive-watch.timer
+macf-sup-liveness.service / macf-sup-liveness.timer
+macf-sup-quality-trends.service / macf-sup-quality-trends.timer
+macf-sup-token-health.service / macf-sup-token-health.timer
+macf-sup-nightly-backup.service / macf-sup-nightly-backup.timer

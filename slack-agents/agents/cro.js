@@ -5,9 +5,9 @@
 const cron = require('node-cron');
 const { AGENTS, CHANNELS } = require('../config');
 const state = require('../utils/state');
-const { generateReport } = require('../utils/anthropic');
+const { generateReport, generateWithTools } = require('../utils/anthropic');
 const { resolveChannel: _resolveChannel } = require('../utils/channels');
-const { relay, stripDelegations } = require('../utils/delegation');
+const { relay, stripDelegations, delegationFailure } = require('../utils/delegation');
 const { search: webSearch, browse, formatResults } = require('../utils/search');
 
 const AGENT = AGENTS.cro;
@@ -135,9 +135,22 @@ async function handleDelegation(messageText, visitedAgents = new Set(), channelI
     : '';
 
   const context = `Research request from ${fromAgent}:\n"${request}"${searchCtx}\n\nProvide a focused research brief addressing this specific request. Include sources where possible.`;
-  const response = await generateReport({ systemPrompt: AGENT.systemPrompt, context, maxTokens: 1500 });
+  // TOOL EXECUTION (Oct 9, 2026): CRO now has local tools — can check URLs,
+  // write research files, build artifacts alongside live web search.
+  const { response, toolResults, toolsUsed, ok, errorClass } = await generateWithTools({
+    systemPrompt: AGENT.systemPrompt,
+    context,
+    maxTokens: 2000,
+    agentId: AGENT_ID,
+  });
 
   // Respond in the research channel and tag the requesting agent
+    // CEO BUILD (Oct 22, 2026): honor the generateWithTools failure contract.
+  // A failed run (ok === false / null response) is a FAILED delegation —
+  // never a completed one with an empty body (audit F1).
+  if (ok === false || response == null) {
+    return delegationFailure({ errorClass, agentId: AGENT_ID, threadTs, channel: AGENT.primaryChannel });
+  }
   const subResults = await relay(response, AGENT_ID, visitedAgents, channelId);
 
   // POLLER IS SOLE POSTER (Oct 4, 2026 — architectural fix):
@@ -149,7 +162,14 @@ async function handleDelegation(messageText, visitedAgents = new Set(), channelI
     channel: AGENT.primaryChannel,
     subResults: subResults,
     agentId: AGENT_ID,
-    evidence: searchResults ? `Web search executed: ${searchResults.length} results` : 'No search results',
+    // EVIDENCE FIX (Oct 9, 2026): reflects actual tool usage — web search
+    // plus generateWithTools local tool executions.
+    evidence: (searchResults || toolsUsed > 0)
+      ? `Research deliverable with tool execution(s): ${[
+          ...(searchResults ? [`web-search (${searchResults.length} results)`] : []),
+          ...toolResults.map(t => t.tool),
+        ].join(', ')}`
+      : 'Research deliverable generated (LLM report, no tools needed)',
     timestamp: new Date().toISOString()
   };
 }

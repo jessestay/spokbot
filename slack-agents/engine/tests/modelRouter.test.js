@@ -31,7 +31,11 @@ describe('Feature: Model configuration switching', () => {
     test('Smart tier tries paid alias before free fallback', () => {
       const chain = getFallbackChain('smart');
       expect(chain[0]).toBe('macf-smart-paid');
-      expect(chain[chain.length - 1]).toBe('macf-smart-free');
+      // #807 Phase 1 + Oct 21 deepseek leg: free is in the chain before the
+      // final local leg — macf-local is LAST, not macf-smart-free.
+      expect(chain).toContain('macf-smart-free');
+      expect(chain.indexOf('macf-smart-free')).toBeLessThan(chain.length - 1);
+      expect(chain[chain.length - 1]).toBe('macf-local');
     });
 
     test('Smart tier has a paid option before free fallback', () => {

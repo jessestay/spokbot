@@ -9,7 +9,7 @@ const { AGENTS, CHANNELS } = require('../config');
 const state = require('../utils/state');
 const { generateReport, generateWithTools } = require('../utils/anthropic');
 const { resolveChannel: _resolveChannel } = require('../utils/channels');
-const { relay, stripDelegations } = require('../utils/delegation');
+const { relay, stripDelegations, delegationFailure } = require('../utils/delegation');
 
 const AGENT = AGENTS.cuxo;
 const AGENT_ID = AGENT.id; // 'cuxo'
@@ -106,11 +106,18 @@ When giving visual specs, use format: Element | Color (#hex) | Size | Spacing | 
 
   // TOOL EXECUTION (Oct 9, 2026): CUXO now has local tools — can check URLs,
   // write design spec files, build artifacts.
-  const { response, toolResults, toolsUsed } = await generateWithTools({
+  const { response, toolResults, toolsUsed, ok, errorClass } = await generateWithTools({
     systemPrompt: AGENT.systemPrompt,
     context,
     maxTokens: 2000,
+    agentId: AGENT_ID,
   });
+    // CEO BUILD (Oct 22, 2026): honor the generateWithTools failure contract.
+  // A failed run (ok === false / null response) is a FAILED delegation —
+  // never a completed one with an empty body (audit F1).
+  if (ok === false || response == null) {
+    return delegationFailure({ errorClass, agentId: AGENT_ID, threadTs, channel: AGENT.primaryChannel });
+  }
   const subResults = await relay(response, AGENT_ID, visitedAgents, channelId);
 
   // POLLER IS SOLE POSTER (Oct 4, 2026 — architectural fix):

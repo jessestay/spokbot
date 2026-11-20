@@ -11,9 +11,9 @@
 const cron = require('node-cron');
 const { AGENTS, CHANNELS } = require('../config');
 const state = require('../utils/state');
-const { generateReport, generateProactivePost } = require('../utils/anthropic');
+const { generateReport, generateProactivePost, generateWithTools } = require('../utils/anthropic');
 const { resolveChannel: _resolveChannel } = require('../utils/channels');
-const { relay, stripDelegations } = require('../utils/delegation');
+const { relay, stripDelegations, delegationFailure } = require('../utils/delegation');
 const { invokeTool, listTools } = require('../engine/mcpClient');
 
 const AGENT = AGENTS.cmo;
@@ -195,7 +195,20 @@ If it needs content drafted, delegate to CCO. If it needs design, delegate to CU
 ${toolResult ? 'Include the tool result in your response with specific findings.' : ''}
   `.trim();
 
-  const response = await generateReport({ systemPrompt: AGENT.systemPrompt, context });
+  // TOOL EXECUTION (Oct 9, 2026): CMO now has local tools — can check URLs,
+  // write files, build artifacts alongside the MCP pre-fetch above.
+  const { response, toolResults, toolsUsed, ok, errorClass } = await generateWithTools({
+    systemPrompt: AGENT.systemPrompt,
+    context,
+    maxTokens: 2000,
+    agentId: AGENT_ID,
+  });
+    // CEO BUILD (Oct 22, 2026): honor the generateWithTools failure contract.
+  // A failed run (ok === false / null response) is a FAILED delegation —
+  // never a completed one with an empty body (audit F1).
+  if (ok === false || response == null) {
+    return delegationFailure({ errorClass, agentId: AGENT_ID, threadTs, channel: AGENT.primaryChannel });
+  }
   const subResults = await relay(response, AGENT_ID, visitedAgents, channelId);
 
   // ROOT-CAUSE FIX: Do NOT post directly. Return the response for the poller
@@ -211,9 +224,14 @@ ${toolResult ? 'Include the tool result in your response with specific findings.
     threadTs: threadTs,           // Poller uses this for thread reply
     channel: AGENT.primaryChannel,
     subResults: subResults,
-    evidence: toolResult ? `Executed via MCP: ${JSON.stringify(toolResult).slice(0, 200)}` : null,
-    // NULL evidence for text-only replies forces the poller to validate
-    // the response content itself for verifiable deliverables.
+    // EVIDENCE FIX (Oct 9, 2026): reflects actual tool usage — MCP pre-fetch
+    // plus generateWithTools local tool executions.
+    evidence: (toolResult || toolsUsed > 0)
+      ? `Marketing deliverable with tool execution(s): ${[
+          ...(toolResult ? ['mcp-prefetch'] : []),
+          ...toolResults.map(t => t.tool),
+        ].join(', ')}`
+      : 'Marketing deliverable generated (LLM report, no tools needed)',
     agentId: AGENT_ID,
     timestamp: new Date().toISOString()
   };

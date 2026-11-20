@@ -7,11 +7,11 @@ const fs = require('fs');
 const path = require('path');
 const { AGENTS, CHANNELS } = require('../config');
 const state = require('../utils/state');
-const { generateReport } = require('../utils/anthropic');
+const { generateReport, generateWithTools } = require('../utils/anthropic');
 const { chatTurn, isConfigured: gatewayConfigured } = require('../utils/litellm');
 const { runToolLoop, withModelFallback } = require('../mcp-client');
 const { resolveChannel: _resolveChannel } = require('../utils/channels');
-const { relay, stripDelegations } = require('../utils/delegation');
+const { relay, stripDelegations, delegationFailure } = require('../utils/delegation');
 
 const AGENT = AGENTS.cfo;
 const AGENT_ID = AGENT.id; // 'cfo'
@@ -167,7 +167,10 @@ async function handleDelegation(messageText, visitedAgents = new Set(), channelI
   const context = `Financial request from ${fromAgent}: "${request}"\nProvide specific financial analysis: Current | Target | Action | Impact.`;
   // Hands path: money questions get verified tool data, not LLM guesses.
   let response;
+  let genErrorClass = null;
   let handsEvidence = null;
+  let toolResults = [];
+  let toolsUsed = 0;
   if (needsHands(request) && gatewayConfigured()) {
     try {
       response = await answerWithHands({ systemPrompt: AGENT.systemPrompt, request: context });
@@ -178,7 +181,23 @@ async function handleDelegation(messageText, visitedAgents = new Set(), channelI
       handsEvidence = `Hands failed: ${err.message.slice(0, 100)}`;
     }
   } else {
-    response = await generateReport({ systemPrompt: AGENT.systemPrompt, context, maxTokens: 1200 });
+    // TOOL EXECUTION (Oct 9, 2026): CFO now has local tools — can check URLs,
+    // write files, build financial artifacts.
+    const result = await generateWithTools({
+      systemPrompt: AGENT.systemPrompt,
+      context,
+      maxTokens: 2000,
+      agentId: AGENT_ID,
+    });
+    response = result.response;
+    genErrorClass = result.errorClass || null;
+    toolResults = result.toolResults;
+    toolsUsed = result.toolsUsed;
+  }
+  // CEO BUILD (Oct 22, 2026): a null response means the run failed — surface
+  // it as a failed delegation instead of a completed empty reply (audit F1).
+  if (response == null) {
+    return delegationFailure({ errorClass: genErrorClass, agentId: AGENT_ID, threadTs, channel: AGENT.primaryChannel });
   }
   const subResults = await relay(response, AGENT_ID, visitedAgents, channelId);
 
@@ -191,7 +210,11 @@ async function handleDelegation(messageText, visitedAgents = new Set(), channelI
     channel: AGENT.primaryChannel,
     subResults: subResults,
     agentId: AGENT_ID,
-    evidence: handsEvidence || 'LLM response (no tool execution)',
+    // EVIDENCE FIX (Oct 9, 2026): hands path evidence preserved; otherwise
+    // reflects generateWithTools local tool executions.
+    evidence: handsEvidence || (toolsUsed > 0
+      ? `Financial assessment with ${toolsUsed} tool execution(s): ${toolResults.map(t => t.tool).join(', ')}`
+      : 'Financial assessment generated (LLM report, no tools needed)'),
     timestamp: new Date().toISOString()
   };
 }

@@ -29,7 +29,7 @@
     "channel": "C0ASH4TF604",
     "enabled": true,
     "interval_minutes": 60,
-    "max_standup_age_minutes": 90,
+    "max_standup_age_minutes": 30,
     "questions": [
       "What did you accomplish in the last hour?",
       "What are you planning for the next hour?",

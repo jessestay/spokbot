@@ -164,10 +164,51 @@ function schemaParams(tool) {
   };
 }
 
+/**
+ * Strict-mode schema normalization (M2, Vikunja #771): OpenAI strict
+ * tool calling requires additionalProperties:false and EVERY property
+ * listed in required. Originally-optional properties become nullable
+ * (type widened with 'null') so the model can still omit them by
+ * passing null. Recurses into nested objects. Never mutates the input.
+ */
+function normalizeStrictSchema(schema) {
+  if (!schema || typeof schema !== 'object') return schema;
+  const out = JSON.parse(JSON.stringify(schema));
+  const walk = (node) => {
+    if (!node || typeof node !== 'object') return;
+    // A node's type may already have been widened to ['object', 'null']
+    // by the time recursion reaches it — treat that as object-like too.
+    const isObjectLike = node.type === 'object' || (Array.isArray(node.type) && node.type.includes('object'));
+    if (isObjectLike && node.properties && typeof node.properties === 'object') {
+      const keys = Object.keys(node.properties);
+      const origRequired = new Set(Array.isArray(node.required) ? node.required : []);
+      node.additionalProperties = false;
+      node.required = keys;
+      for (const key of keys) {
+        const prop = node.properties[key];
+        if (!origRequired.has(key) && prop && typeof prop === 'object' && prop.type) {
+          if (typeof prop.type === 'string' && prop.type !== 'null') prop.type = [prop.type, 'null'];
+          else if (Array.isArray(prop.type) && !prop.type.includes('null')) prop.type = [...prop.type, 'null'];
+        }
+        walk(prop);
+      }
+    }
+    if (node.items) walk(node.items);
+  };
+  walk(out);
+  return out;
+}
+
 function openAiToolDefs(TOOLS) {
   return Object.entries(TOOLS).map(([name, t]) => ({
     type: 'function',
-    function: { name, description: t.description, parameters: schemaParams(t) },
+    // M2: native strict tool calling — the provider enforces the schema
+    // at generation time on the OpenAI-format route. Entries flagged
+    // strict:false (MCP-backed tools, #807 US-P2.5) keep their server
+    // schema as-is — arbitrary JSON Schema cannot be strict-forced.
+    function: t.strict === false
+      ? { name, description: t.description, strict: false, parameters: schemaParams(t) }
+      : { name, description: t.description, strict: true, parameters: normalizeStrictSchema(schemaParams(t)) },
   }));
 }
 
@@ -183,9 +224,16 @@ function anthropicToolDefs(TOOLS) {
 // Phase 2 — telemetry no longer infers anything from prose.
 const UNEXECUTED_CALL_PATTERNS = [
   /\[\s*(fileRead|fileWrite|fileList|urlCheck)\s*\(/,          // [fileRead(path='x')]
+  /\[\s*(write|read|list|check)\s*\(\s*(?:path|url)\s*=/,      // [write(path='x')] — short-name dialect (live leak, Oct 14 v2 run)
   /\b(fileRead|fileWrite|fileList|urlCheck)\((?:path|url)\s*=/, // bare fileRead(path='x')
   /<\|tool_call/,                                                // leaked control tokens
+  /<tool_call>\s*<function=[a-zA-Z]/,                             // XML function dialect: <tool_call><function=fileRead> (live leak, Nov 2, 2026 CCO batch run)
+  /<function=[a-zA-Z][\w-]*>\s*<parameter=/,                     // same dialect without the <tool_call> wrapper
   /\[TOOL:\s*(fileRead|fileWrite|fileList|urlCheck)\]/,         // unexecuted [TOOL:] line
+  /<\s*\/?\s*｜/,                                               // DeepSeek DSML fullwidth control token
+  /tool\s*▁\s*calls?/i,                                        // tool▁call(s) marker
+  /▁\s*(begin|end)\s*[｜|]/i,                                   // ▁begin｜ / ▁end｜ marker
+  /｜\s*(invoke|parameter)\b/i,                                 // ｜invoke / ｜parameter tag
 ];
 
 function findUnexecutedCallSyntax(text) {
@@ -233,12 +281,61 @@ const ROLEPLAY_CORRECTION = (syntax) => `Your previous message contained ${synta
  * input, role-played deliverable). Callers must treat ok:false as a failed
  * attempt — never as a deliverable.
  */
-async function generateWithTools({ systemPrompt, context, maxTokens = 2000, model = 'smart', maxToolRounds = 3, agentId = null, taskId = null, outputSchema = null, schemaName = null }) {
-  const { getToolDescriptions, executeTool, TOOLS } = require('./agentTools');
-  const { EVIDENCE_REQUIREMENT, DEMO_STANDARD } = require('./agentBase');
+async function generateWithTools({ systemPrompt, context, maxTokens = 2000, model = 'smart', maxToolRounds = 6, agentId = null, taskId = null, outputSchema = null, schemaName = null, runId = null, checkpointStore = null }) {
+  const { getToolDescriptions, executeTool, executeMcpTool, TOOLS } = require('./agentTools');
+  const { EVIDENCE_REQUIREMENT, DEMO_STANDARD, EXECUTION_REQUIREMENT } = require('./agentBase');
+  // #807 Phase 2 (US-P2.4): every delegation carries the execution
+  // requirement — the harness must teach execution, not assessment.
+  if (typeof systemPrompt === 'string' && systemPrompt && !systemPrompt.includes('EXECUTION REQUIREMENT')) {
+    systemPrompt = `${systemPrompt}\n\n${EXECUTION_REQUIREMENT}`;
+  }
+
+  // #807 Phase 2 (US-P2.5): MCP wiring — the agent's granted MCP servers
+  // (hands/grants.json) join the tool registry for this run. Discovery
+  // failure degrades to the static registry; MCP is additive, never a
+  // new way for a delegation to die.
+  let toolbox = TOOLS;
+  let mcpBudget = 0;
+  let mcpCalls = 0;
+  if (agentId) {
+    try {
+      const mcpTools = require('./mcpTools');
+      const extra = await mcpTools.buildMcpToolDefs(agentId);
+      if (extra && Object.keys(extra).length) {
+        toolbox = { ...TOOLS, ...extra };
+        mcpBudget = mcpTools.mcpBudgetFor(agentId);
+      }
+    } catch { /* static registry only */ }
+  }
+
+  // Phase B (Vikunja #789): run-context fallback. Callers that own a
+  // durable run (the directive-work workflow step; the poller's inline
+  // fallback) open a run context instead of threading options through
+  // every agent. Explicit options always win. The first call inside a
+  // context claims the run ID for its agent; a nested call from a
+  // different agent (a relay sub-delegation) derives its own
+  // deterministic run ID so two conversations never share a checkpoint.
+  if (!runId || !checkpointStore) {
+    try {
+      const ctx = require('../engine/runContext').currentRunContext();
+      if (ctx && ctx.runId) {
+        if (!runId) {
+          const me = agentId || 'agent';
+          if (!ctx._claimedBy) { ctx._claimedBy = me; runId = ctx.runId; }
+          else if (ctx._claimedBy === me) { runId = ctx.runId; }
+          else { runId = `${ctx.runId}:${me}`; }
+        }
+        if (!checkpointStore && ctx.checkpointStore) checkpointStore = ctx.checkpointStore;
+      }
+    } catch { /* the context is an enhancement; its absence changes nothing */ }
+  }
 
   const toolResults = [];
   const violations = new Map();
+  // CEO BUILD 7 (Oct 22, 2026): run discipline — progress checkpoint,
+  // final-correction escalation, failure salvage (utils/runDiscipline.js).
+  const { createRunDiscipline, escalationMessage } = require('./runDiscipline');
+  const discipline = createRunDiscipline({ maxToolRounds });
   let mode = null;
 
   // Typed deliverable (Pillar 3): when outputSchema is set, a candidate
@@ -261,17 +358,62 @@ async function generateWithTools({ systemPrompt, context, maxTokens = 2000, mode
 
   // Execute one tool call through the gateway choke point (validation +
   // receipts happen inside executeTool) and track repeated violations.
-  async function runTool(toolName, args) {
-    const result = await executeTool(toolName, args, { agentId, taskId });
+  async function runTool(toolName, args, toolCall) {
+    // #807 Phase 2 (US-P2.5): MCP-backed tools dispatch through
+    // executeMcpTool (grant re-check + receipt inside); a hallucinated
+    // mcp_ name that this agent was never offered fails as permission.
+    let result;
+    const entry = toolbox[toolName];
+    if (toolCall && toolCall.argsParseError) {
+      // #925 (Nov 2, 2026): the gateway flagged this call's arguments as
+      // unparseable — a truncated oversized payload (see litellm
+      // attemptOnce). Do NOT execute it with empty args: that produced a
+      // misleading "missing required arguments" rejection the model could
+      // not act on, and it retried the same oversized call until the run
+      // died. Return an invalid_input correction that names the cause and
+      // the remedy; the violation tracking below treats it like any other
+      // correctable violation, so repeated oversized calls escalate and
+      // fail instead of looping.
+      result = {
+        ok: false,
+        errorClass: 'invalid_input',
+        tool: toolName,
+        error: `Your ${toolName} call was NOT executed: its arguments could not be parsed (${toolCall.argsParseError.rawBytes || 0} bytes received — the payload was almost certainly truncated because it was too large). Retry with a SMALLER payload: split large content across multiple calls (for example, one draft or section per fileWrite call, extending the file incrementally).`,
+        correction: {
+          expected: {},
+          received: [],
+          missing: ['parseable JSON arguments — the call was truncated; split the payload into smaller tool calls'],
+          unknown: [],
+          parseError: true,
+        },
+      };
+    } else if (entry && entry.mcp) {
+      if (mcpCalls >= mcpBudget) {
+        result = { ok: false, error: `MCP call budget exhausted for this task (${mcpBudget})`, errorClass: 'budget', tool: toolName };
+        toolResults.push({ tool: toolName, args, result });
+        return { result, repeatedViolation: false };
+      }
+      mcpCalls++;
+      result = await executeMcpTool(toolName, args, { agentId, taskId }, entry.mcp);
+    } else if (typeof toolName === 'string' && toolName.startsWith('mcp_')) {
+      result = { ok: false, error: `Tool ${toolName} is not granted to agent '${agentId || 'unknown'}'`, errorClass: 'permission', tool: toolName };
+      toolResults.push({ tool: toolName, args, result });
+      return { result, repeatedViolation: false };
+    } else {
+      result = await executeTool(toolName, args, { agentId, taskId });
+    }
     toolResults.push({ tool: toolName, args, result });
     let repeatedViolation = false;
+    let violationSig = null;
     if (result && !result.ok && result.errorClass === 'invalid_input' && result.correction) {
       const sig = `${toolName}|${(result.correction.received || []).join(',')}|${(result.correction.missing || []).join(',')}`;
+      violationSig = sig;
       const n = (violations.get(sig) || 0) + 1;
       violations.set(sig, n);
       if (n >= 2) repeatedViolation = true;
     }
-    return { result, repeatedViolation };
+    discipline.observeTool(toolName, result);
+    return { result, repeatedViolation, violationSig };
   }
 
   const finish = (extra) => ({ toolResults, toolsUsed: toolResults.length, toolCallingMode: mode, ...extra });
@@ -281,29 +423,210 @@ async function generateWithTools({ systemPrompt, context, maxTokens = 2000, mode
     deliverable,
   });
 
+  // ROUND-EXHAUSTION-WITH-WORK (Oct 21, 2026): the 'LLM returned empty
+  // response after retries' error conflates two failure shapes.
+  // (a) True empty-completion streaks — the model returned nothing; those
+  // keep the throw (and the caller's failure strike) exactly as before.
+  // (b) Round exhaustion — the agent spent its rounds doing VERIFIED tool
+  // work and the final summary turn came back empty or was consumed by a
+  // deliverable-judgement continuation (task #105, Oct 21 16:44Z: seven
+  // first-attempt tool turns, 7 ok receipts, ~30s of the 240s step
+  // deadline, then the throw + a failure strike for real work).
+  // Shape (b) := this run banked >=1 successful tool receipt — a
+  // toolResults entry with result.ok, the same signal engine/receipts.js
+  // records as status 'ok' on every executeTool exit path. When the
+  // predicate holds, return a distinctly-classed failure object
+  // (errorClass 'round_exhausted_with_work', the established fail()
+  // shape) instead of throwing, so callers can record the run WITHOUT a
+  // failure strike. Zero ok receipts → returns null and the caller
+  // throws exactly as before. NOTE: on a checkpoint resume, toolResults
+  // includes the run's restored receipts — that is the same run's work
+  // product, so it counts.
+  const roundExhaustedWithWork = () => {
+    const okReceipts = toolResults.filter(t => t && t.result && t.result.ok === true).length;
+    if (okReceipts === 0) return null;
+    console.log(`[generateWithTools] round exhaustion after verified tool work (${okReceipts} ok receipts / ${toolResults.length} tool calls) — classed round_exhausted_with_work, not an empty-streak failure`);
+    return fail('round_exhausted_with_work', { roundExhaustedWithWork: true, okReceipts });
+  };
+
   const nativeContext = `Task: ${context}\n\nYou have tools available on the native tool channel. Call them when the task needs real output (files, verified links). When the work is done, write your final answer directly in plain prose — never write tool calls or tool results as text. Be concise. No thinking-process narration.`;
+
+  // ─── Step resilience (Oct 15, 2026 — Jesse's order) ──────────────────────
+  // An empty or failed LLM step must not kill the whole delegation. All
+  // progress (completed tool calls and their results) lives in `messages`
+  // and in the receipts ledger, so retrying a step never redoes finished
+  // work. Each step retries with escalating backoff until the delegation
+  // deadline; after 2 failures at a step the history is compacted (old tool
+  // results shrink to stubs) because smaller payloads survive the gateway's
+  // empty-response streaks more often (Oct 15 diagnosis: small requests
+  // succeeded while large multi-turn payloads emptied). If the deadline
+  // passes, the loop fails the way it used to — and the directive poller's
+  // dead-letter auto-requeue picks the work back up on a later cycle.
+  const stepDeadlineMs = () => Number(process.env.MACF_STEP_DEADLINE_MS || 240000);
+  const stepBackoffBaseMs = () => Number(process.env.MACF_STEP_BACKOFF_MS || 10000);
+  const sleepMs = (ms) => new Promise(r => setTimeout(r, ms));
+  function compactMessages(messages) {
+    let lastToolIdx = -1;
+    messages.forEach((m, i) => { if (m.role === 'tool') lastToolIdx = i; });
+    messages.forEach((m, i) => {
+      if (m.role === 'tool' && i !== lastToolIdx && typeof m.content === 'string' && m.content.length > 600) {
+        m.content = `${m.content.slice(0, 200)}…[compacted: tool result already executed and receipted]`;
+      }
+    });
+  }
 
   // ─── Native loop: LiteLLM gateway route (OpenAI-style tools) ─────────────
   async function gatewayNativeLoop() {
-    const tools = openAiToolDefs(TOOLS);
-    const messages = [{ role: 'user', content: nativeContext }];
+    const tools = openAiToolDefs(toolbox);
+    // Phase A checkpointing (US-A1/A2, Vikunja #789): when the caller
+    // supplies a run ID + checkpoint store, this loop writes a checkpoint
+    // after EVERY durability boundary — one completed LLM call, or one
+    // completed tool batch (one expensive call per boundary, US-A1.5) —
+    // and a fresh attempt RESUMES from the run's existing checkpoint
+    // instead of restarting from the assignment text. A checkpoint that
+    // fails validation is quarantined + recorded and the attempt starts
+    // clean rather than wedging on corrupt state (US-A2.4). Without
+    // runId/checkpointStore the loop behaves exactly as before.
+    const checkpointing = !!(runId && checkpointStore &&
+      typeof checkpointStore.saveCheckpoint === 'function' &&
+      typeof checkpointStore.loadCheckpoint === 'function');
+    // Phase D (US-D1.2, Vikunja #789): ONE stable session id for the whole
+    // delegation, derived deterministically from its identity (run >
+    // task > context seed). chatTurn turns it into cache breakpoints +
+    // sticky routing; without it the wire format is unchanged.
+    const cacheSessionBase = require('./promptCache').deriveSessionId({ agentId, taskId, runId, seed: context });
+    let cacheSessionId = cacheSessionBase;
+    // EMPTY-STREAK FIX (Oct 21, 2026): the derived id is stable for the
+    // whole delegation — that is the point (cache locality + sticky
+    // routing) — but it also means a delegation sticky-pinned to an
+    // upstream instance that returns empties would retry on that same
+    // pin until the step deadline (observed: workEngine task runs dying
+    // on empty streaks while fresh directive runs/probes succeed; task
+    // runs derive their session from the TASK id, so the pin is the
+    // same on every run of the task, forever). When a step fails on
+    // empties, rotate the session for the retry (:rotN suffix) so the
+    // retry lands on a fresh instance. Healthy steps keep the stable
+    // id untouched; chatTurn additionally rotates within a single call.
+    let sessionRotations = 0;
+    const rotateSessionAfterEmpty = () => {
+      if (!cacheSessionBase) return;
+      sessionRotations++;
+      cacheSessionId = `${cacheSessionBase}:rot${sessionRotations}`;
+      console.log(`[generateWithTools] rotating session after empty streak -> ${cacheSessionId}`);
+    };
+    let messages = [{ role: 'user', content: nativeContext }];
+    let stepIndex = 0;
+    const tokenTotals = { promptTokens: 0, completionTokens: 0 };
+    if (checkpointing) {
+      let existing = null;
+      try { existing = await checkpointStore.loadCheckpoint(runId); } catch { existing = null; }
+      if (existing) {
+        const cpMod = require('./checkpointStore');
+        const vRecord = cpMod.validateCheckpoint(existing);
+        const vHistory = vRecord.valid ? cpMod.validateHistory(existing.messages) : { valid: false, errors: [] };
+        if (vRecord.valid && vHistory.valid) {
+          const resume = cpMod.buildResumeState(existing);
+          messages = resume.messages;
+          stepIndex = resume.stepIndex;
+          tokenTotals.promptTokens = resume.tokens.promptTokens;
+          tokenTotals.completionTokens = resume.tokens.completionTokens;
+          if (resume.tokens.cachedTokens !== undefined) tokenTotals.cachedTokens = resume.tokens.cachedTokens;
+          if (resume.tokens.cacheCreationTokens !== undefined) tokenTotals.cacheCreationTokens = resume.tokens.cacheCreationTokens;
+          for (const tr of resume.toolResults) toolResults.push(tr);
+          console.log(`[generateWithTools] resuming run ${runId} from checkpoint at step ${stepIndex}`);
+        } else {
+          const reason = [...(vRecord.errors || []), ...(vHistory.errors || [])].join('; ') || 'invalid checkpoint';
+          try { await checkpointStore.quarantineCheckpoint(runId, `checkpoint failed validation: ${reason}`); } catch { /* quarantine is recorded best-effort; the clean start is not optional */ }
+          console.log(`[generateWithTools] checkpoint for run ${runId} failed validation (${reason}) — quarantined; starting clean`);
+        }
+      }
+    }
+    // One checkpoint write per durability boundary. A failed write aborts
+    // the delegation as a checkpoint failure (US-A1.3): the run must
+    // never continue silently uncheckpointed.
+    async function saveCheckpoint(status, response) {
+      if (!checkpointing) return;
+      stepIndex += 1;
+      try {
+        await checkpointStore.saveCheckpoint(runId, {
+          messages, stepIndex, toolResults,
+          tokens: { ...tokenTotals }, status,
+          ...(response !== undefined ? { response } : {}),
+        });
+      } catch (e) {
+        throw new Error(`checkpoint write failed for run ${runId} at step ${stepIndex}: ${e.message}`);
+      }
+    }
     let syntaxStrikes = 0;
+    // #807 Phase 1 QUALITY GATE (US-P1.3): track which route answered each
+    // turn. The local routes are the desktop Ollama models (macf-local =
+    // qwen3.5:4b, macf-cheap = qwen2.5:3b) — the no-spend second route. A
+    // run whose FINAL answer came from a local route may only finalize on
+    // verifiable work: >=1 executed tool call, or a schema-valid typed
+    // deliverable (judged above). A local text-only answer is no_result —
+    // it requeues for a full-strength route, never a stamped completion.
+    const LOCAL_ROUTES = new Set(['macf-local', 'macf-cheap']);
+    const isLocalRoute = (r) => !!r && LOCAL_ROUTES.has(r);
+    let lastRoute = null;
+    const routeStamp = () => (isLocalRoute(lastRoute) ? { localRoute: true, answeredByRoute: lastRoute } : {});
+    const deadline = Date.now() + stepDeadlineMs();
     for (let round = 0; round <= maxToolRounds; round++) {
       const wantTools = round < maxToolRounds;
       let turn;
-      try {
-        turn = await litellm.chatTurn({
-          systemPrompt, messages, model, maxTokens,
-          ...(wantTools ? { tools } : {}),
-        });
-      } catch (err) {
-        if (wantTools && /tools?\s+(are\s+)?not supported|tool calling (is )?not supported|functions?\s+(are\s+)?not supported/i.test(err.message || '')) {
-          return { fallback: 'tools-unsupported' };
+      let stepFailures = 0;
+      for (;;) {
+        try {
+          turn = await litellm.chatTurn({
+            systemPrompt, messages, model, maxTokens,
+            ...(wantTools ? { tools } : {}),
+            ...(cacheSessionId ? { sessionId: cacheSessionId } : {}),
+          });
+        } catch (err) {
+          if (wantTools && /tools?\s+(are\s+)?not supported|tool calling (is )?not supported|functions?\s+(are\s+)?not supported/i.test(err.message || '')) {
+            return { fallback: 'tools-unsupported' };
+          }
+          const retryable = /all models failed|empty/i.test(err.message || '');
+          if (!retryable || Date.now() >= deadline) throw err;
+          stepFailures++;
+          if (/empty/i.test(err.message || '')) rotateSessionAfterEmpty();
+          if (stepFailures === 2) compactMessages(messages);
+          const wait = Math.min(stepBackoffBaseMs() * Math.pow(2, stepFailures - 1), 80000);
+          console.log(`[generateWithTools] step failed (${String(err.message).slice(0, 100)}); step retry ${stepFailures} in ${wait}ms — completed work is preserved`);
+          await sleepMs(wait);
+          continue;
         }
-        throw err;
+        if (turn && turn.toolsDropped) return { fallback: 'tools-dropped' };
+        const hasCalls = !!(turn && turn.toolCalls && turn.toolCalls.length > 0);
+        if (turn && turn.text) discipline.observeText(turn.text);
+        const hasText = !!(turn && turn.text);
+        if (!hasCalls && !hasText && Date.now() < deadline) {
+          // Empty turn: a failed STEP, not a spent round. Retry the step.
+          stepFailures++;
+          rotateSessionAfterEmpty();
+          if (stepFailures === 2) compactMessages(messages);
+          const wait = Math.min(stepBackoffBaseMs() * Math.pow(2, stepFailures - 1), 80000);
+          console.log(`[generateWithTools] empty turn; step retry ${stepFailures} in ${wait}ms — completed work is preserved`);
+          await sleepMs(wait);
+          continue;
+        }
+        break;
       }
-      if (turn && turn.toolsDropped) return { fallback: 'tools-dropped' };
+      if (turn && turn.route) lastRoute = turn.route;
       const calls = (turn && turn.toolCalls) || [];
+      // Phase A (US-A1): the completed call's token usage accumulates
+      // into the run's checkpoint token counters. Phase D: cached-token
+      // counters accumulate too, lazily — the keys appear only when a
+      // provider actually reported cache data (US-D2 measurement).
+      if (turn && turn.usage) {
+        tokenTotals.promptTokens += Number(turn.usage.promptTokens) || 0;
+        tokenTotals.completionTokens += Number(turn.usage.completionTokens) || 0;
+        if (turn.usage.cachedTokens !== undefined) {
+          tokenTotals.cachedTokens = (tokenTotals.cachedTokens || 0) + (Number(turn.usage.cachedTokens) || 0);
+        }
+        if (turn.usage.cacheCreationTokens !== undefined) {
+          tokenTotals.cacheCreationTokens = (tokenTotals.cacheCreationTokens || 0) + (Number(turn.usage.cacheCreationTokens) || 0);
+        }
+      }
       if (calls.length) {
         messages.push({
           role: 'assistant',
@@ -313,24 +636,52 @@ async function generateWithTools({ systemPrompt, context, maxTokens = 2000, mode
             function: { name: tc.toolName, arguments: JSON.stringify(tc.args || {}) },
           })),
         });
+        // Durability boundary: the LLM call completed.
+        await saveCheckpoint('running');
+        let escalationNote = null;
         for (let i = 0; i < calls.length; i++) {
           const tc = calls[i];
           const id = tc.id || `call_${round}_${i}`;
-          const { result, repeatedViolation } = await runTool(tc.toolName, tc.args || {});
+          const { result, repeatedViolation, violationSig } = await runTool(tc.toolName, tc.args || {}, tc);
           messages.push({ role: 'tool', tool_call_id: id, content: JSON.stringify(result).slice(0, 2000) });
-          if (repeatedViolation) return { failure: fail('invalid_input') };
+          if (repeatedViolation) {
+            // CEO BUILD 7: one final-correction round naming the exact
+            // violated fields before invalid_input may end the run.
+            if (discipline.escalationAvailable(violationSig)) {
+              discipline.markEscalated(violationSig);
+              escalationNote = escalationMessage(tc.toolName, result && result.correction);
+              break;
+            }
+            await saveCheckpoint('running');
+            return { failure: fail('invalid_input') };
+          }
         }
+        // Durability boundary: the tool batch completed — the checkpoint
+        // now includes every tool result BEFORE the next LLM call (US-A1.2).
+        await saveCheckpoint('running');
+        // CEO BUILD 7: final-correction and progress-checkpoint notes ride
+        // as user messages into the next turn.
+        if (escalationNote) { messages.push({ role: 'user', content: escalationNote }); escalationNote = null; }
+        if (discipline.steeringDue(round)) messages.push({ role: 'user', content: discipline.steeringText(round) });
         continue;
       }
       const text = (turn && turn.text) || '';
       if (!text) continue; // empty turn — spend a round; exhaustion handled after the loop
       if (outputSchema) {
         const j = judgeDeliverable(text);
-        if (j.ok) return { done: deliverableDone(j.deliverable) };
+        if (j.ok) {
+          messages.push({ role: 'assistant', content: text });
+          await saveCheckpoint('done', text);
+          // Schema-valid deliverable = verifiable work: a local route may
+          // finalize here, stamped with its provenance (US-P1.3).
+          const d = deliverableDone(j.deliverable);
+          return { done: { ...d, ...routeStamp() } };
+        }
         deliverableStrikes++;
         if (deliverableStrikes >= 2) return { failure: fail('invalid_deliverable', { validationErrors: j.validationErrors }) };
         messages.push({ role: 'assistant', content: text });
         messages.push({ role: 'user', content: deliverableCorrection(j.validationErrors) });
+        await saveCheckpoint('running');
         continue;
       }
       const syntax = findUnexecutedCallSyntax(text);
@@ -339,16 +690,95 @@ async function generateWithTools({ systemPrompt, context, maxTokens = 2000, mode
         if (syntaxStrikes >= 2) return { failure: fail('invalid_deliverable') };
         messages.push({ role: 'assistant', content: text });
         messages.push({ role: 'user', content: ROLEPLAY_CORRECTION(syntax) });
+        await saveCheckpoint('running');
         continue;
       }
-      return { done: finish({ response: text }) };
+      // #807 Phase 1 QUALITY GATE (US-P1.3): a local-route final answer
+      // with zero executed tool work is NOT a completion. Fail it as
+      // no_result so the dead-letter/requeue machinery retries the work
+      // when a full-strength route is healthy again.
+      if (isLocalRoute(lastRoute) && toolResults.length === 0) {
+        console.log(`[generateWithTools] quality gate: local route (${lastRoute}) text-only answer rejected as no_result — no executed tool work to verify`);
+        return { failure: fail('no_result', { localRoute: true, answeredByRoute: lastRoute, gateReason: 'local route final answer without executed tool work or a schema-valid deliverable (#807 Phase 1 quality gate)' }) };
+      }
+      messages.push({ role: 'assistant', content: text });
+      // Final boundary: the completed delegation's last checkpoint is 'done'.
+      await saveCheckpoint('done', text);
+      // Phase D: the accumulated usage (incl. cached tokens when any were
+      // reported) rides on the result so callers can record the run's
+      // cache measurement without re-reading the checkpoint.
+      return { done: finish({ response: text, usage: { ...tokenTotals }, ...routeStamp() }) };
     }
-    throw new Error('LLM returned empty response after retries');
+    // CEO BUILD (Oct 22, 2026): SYNTHESIS GUARANTEE (audit F3). Before a
+    // run that banked verified tool work may fail as round-exhausted, it
+    // gets ONE dedicated synthesis turn — compacted history, no tools,
+    // an explicit write-the-final-answer instruction. The Oct 22 failure
+    // shape was agents doing real research and returning nothing because
+    // the last in-loop turn came back empty; banked work must always get
+    // its summary attempt before the run is allowed to fail.
+    const bankedOk = toolResults.filter(t => t && t.result && t.result.ok === true).length;
+    // Deadline discipline: a synthesis attempt spends real time, so it is
+    // only lawful while the step still has budget — a deadline-burned exit
+    // (shape a) throws exactly as before, no extra call is made.
+    if (bankedOk > 0 && Date.now() < deadline) {
+      try {
+        compactMessages(messages);
+        messages.push({ role: 'user', content: 'You have finished your tool work for this task. Write your final answer NOW from the work already done: plain prose, no tool calls and no tool-call syntax, concise. State the concrete results — what you found, created, changed, or verified. If a step failed or information is missing, say exactly that instead of omitting it.' });
+        const synth = await litellm.chatTurn({
+          systemPrompt, messages, model, maxTokens,
+          ...(cacheSessionId ? { sessionId: cacheSessionId } : {}),
+        });
+        const synthText = (synth && synth.text) || '';
+        if (synthText.trim().length >= 20 && !findUnexecutedCallSyntax(synthText)) {
+          // A schema-typed run may only finish on a schema-valid
+          // deliverable — synthesized prose does not count (the #105
+          // shape stays an honest exhaustion, never a stamped junk
+          // deliverable).
+          let deliverable = null;
+          if (outputSchema) {
+            const j = judgeDeliverable(synthText);
+            if (!j.ok) {
+              console.log('[generateWithTools] synthesis text is not a valid deliverable — falling through to exhaustion handling');
+              throw new Error('synthesis-not-a-deliverable');
+            }
+            deliverable = j.deliverable;
+          }
+          if (synth && synth.route) lastRoute = synth.route;
+          if (synth && synth.usage) {
+            tokenTotals.promptTokens += Number(synth.usage.promptTokens) || 0;
+            tokenTotals.completionTokens += Number(synth.usage.completionTokens) || 0;
+          }
+          messages.push({ role: 'assistant', content: synthText });
+          await saveCheckpoint('done', synthText);
+          console.log(`[generateWithTools] synthesis guarantee produced the final answer (${synthText.trim().length} chars) after round exhaustion with ${bankedOk} ok receipts`);
+          if (deliverable) {
+            const d = deliverableDone(deliverable);
+            return { done: { ...d, synthesized: true, ...routeStamp() } };
+          }
+          return { done: finish({ response: synthText, usage: { ...tokenTotals }, synthesized: true, ...routeStamp() }) };
+        }
+        console.log(`[generateWithTools] synthesis attempt produced no usable text (${synthText.trim().length} chars) — falling through to exhaustion handling`);
+      } catch (synthErr) {
+        if (synthErr.message !== 'synthesis-not-a-deliverable') {
+          console.log(`[generateWithTools] synthesis attempt failed (${String(synthErr.message).slice(0, 100)}) — falling through to exhaustion handling`);
+        }
+      }
+    }
+
+    // Loop exit = rounds spent. With verified work banked and the step
+    // deadline NOT the cause, this is round exhaustion (shape b), not an
+    // empty streak. A deadline-burned exit means step retries consumed
+    // the budget on empties — shape (a) — and throws exactly as before.
+    if (Date.now() < deadline) {
+      const rex = roundExhaustedWithWork();
+      if (rex) return { failure: rex };
+    }
+    { const e = new Error('LLM returned empty response after retries'); e.errorClass = 'no_result'; throw e; } // #807 US-P2.4: mid-exploration exhaustion is no_result, never a completion
   }
 
   // ─── Native loop: direct Anthropic SDK route (tool_use blocks) ───────────
   async function sdkNativeLoop() {
-    const tools = anthropicToolDefs(TOOLS);
+    const tools = anthropicToolDefs(toolbox);
     const messages = [{ role: 'user', content: nativeContext }];
     let syntaxStrikes = 0;
     for (let round = 0; round <= maxToolRounds; round++) {
@@ -366,16 +796,29 @@ async function generateWithTools({ systemPrompt, context, maxTokens = 2000, mode
       const text = blocks
         .filter(b => b.type === 'text' || (b.type === undefined && typeof b.text === 'string'))
         .map(b => b.text).join('');
+      discipline.observeText(text);
       const calls = blocks.filter(b => b.type === 'tool_use')
         .map(b => ({ id: b.id, toolName: b.name, args: b.input || {} }));
       if (calls.length) {
         messages.push({ role: 'assistant', content: blocks });
         const resultBlocks = [];
+        const batchNotes = [];
         for (const tc of calls) {
-          const { result, repeatedViolation } = await runTool(tc.toolName, tc.args);
+          const { result, repeatedViolation, violationSig } = await runTool(tc.toolName, tc.args);
           resultBlocks.push({ type: 'tool_result', tool_use_id: tc.id, content: JSON.stringify(result).slice(0, 2000) });
-          if (repeatedViolation) return { failure: fail('invalid_input') };
+          if (repeatedViolation) {
+            // CEO BUILD 7: same final-correction contract as the gateway loop.
+            if (discipline.escalationAvailable(violationSig)) {
+              discipline.markEscalated(violationSig);
+              batchNotes.push(escalationMessage(tc.toolName, result && result.correction));
+              break;
+            }
+            return { failure: fail('invalid_input') };
+          }
         }
+        // CEO BUILD 7: steering rides as a text block on the same user turn.
+        if (discipline.steeringDue(round)) batchNotes.push(discipline.steeringText(round));
+        if (batchNotes.length) resultBlocks.push({ type: 'text', text: batchNotes.join('\n\n') });
         messages.push({ role: 'user', content: resultBlocks });
         continue;
       }
@@ -399,7 +842,13 @@ async function generateWithTools({ systemPrompt, context, maxTokens = 2000, mode
       }
       return { done: finish({ response: text }) };
     }
-    throw new Error('LLM returned empty response after retries');
+    // Loop exit = rounds spent (this loop has no deadline machinery, so
+    // exit is purely round exhaustion): same shape-(b) classification as
+    // the gateway loop — verified work banked → distinct failure class,
+    // no receipts → the throw below, exactly as before.
+    const rex = roundExhaustedWithWork();
+    if (rex) return { failure: rex };
+    { const e = new Error('LLM returned empty response after retries'); e.errorClass = 'no_result'; throw e; } // #807 US-P2.4: mid-exploration exhaustion is no_result, never a completion
   }
 
   // ─── Text-emulation loop (legacy fallback, explicitly flagged) ───────────
@@ -409,13 +858,17 @@ async function generateWithTools({ systemPrompt, context, maxTokens = 2000, mode
     let conversation = simpleContext;
     let syntaxStrikes = 0;
 
-    async function chatWithRetry(opts, maxRetries = 2) {
+    // finalSummaryCall marks the post-rounds final-answer calls: an empty
+    // there, after rounds of verified tool work, is round exhaustion
+    // (shape b — see roundExhaustedWithWork), while an empty on a
+    // mid-loop round call stays the call-level streak signal it is.
+    async function chatWithRetry(opts, maxRetries = 2, finalSummaryCall = false) {
       for (let attempt = 0; attempt <= maxRetries; attempt++) {
         const resp = await chat(opts);
         if (resp && resp.trim().length > 0) return resp;
         if (attempt < maxRetries) await new Promise(r => setTimeout(r, 1000 * (attempt + 1)));
       }
-      throw new Error('LLM returned empty response after retries');
+      { const e = new Error('LLM returned empty response after retries'); e.errorClass = 'no_result'; if (finalSummaryCall) e.finalSummaryCall = true; throw e; } // #807 US-P2.4: mid-exploration exhaustion is no_result, never a completion
     }
 
     // Judge a candidate final answer. Returns 'retry' (correction fed back),
@@ -493,33 +946,45 @@ async function generateWithTools({ systemPrompt, context, maxTokens = 2000, mode
     // Max rounds reached — get final response without tools.
     const { isGarbledOutput } = require('./delegation');
     const finalPrompt = `Context: ${context}\n\n${EVIDENCE_REQUIREMENT}\n\n${DEMO_STANDARD}\n\nTool results from your work:\n${toolResults.map(t => `- ${t.tool}: ${JSON.stringify(t.result).slice(0, 500)}`).join('\n')}\n\nWrite your final response now, incorporating the tool results above.\n\nDO NOT output any [TOOL:] lines or <|tool_call_start|> blocks. Your tools are done. Just write the professional response.`;
-    let finalResponse = await chatWithRetry({
-      systemPrompt,
-      userMessage: finalPrompt,
-      model,
-      maxTokens,
-    });
-
-    // Typed path: the final answer must validate as a deliverable.
-    if (outputSchema) {
-      const j = judgeDeliverable(finalResponse);
-      if (j.ok) return deliverableDone(j.deliverable);
-      return fail('invalid_deliverable', { validationErrors: j.validationErrors });
-    }
-
-    // Unexecuted call syntax in the final answer is a failed attempt —
-    // it is never stripped-and-shipped (that WAS the production bug).
-    const syntax = findUnexecutedCallSyntax(finalResponse);
-    if (syntax) return fail('invalid_deliverable');
-
-    if (isGarbledOutput(finalResponse)) {
+    let finalResponse;
+    try {
       finalResponse = await chatWithRetry({
-        systemPrompt: systemPrompt + '\n\nCRITICAL: Your previous response was REJECTED for narrating your thinking process ("Here\'s a thinking process", numbered analysis steps, etc.). Respond AS the agent directly. No meta-commentary. No analysis steps. Just the professional output.',
-        userMessage: conversation + '\n\nWrite your final response now. Direct output only — no thinking process narration.',
+        systemPrompt,
+        userMessage: finalPrompt,
         model,
         maxTokens,
-      });
-      if (findUnexecutedCallSyntax(finalResponse)) return fail('invalid_deliverable');
+      }, 2, true);
+
+      // Typed path: the final answer must validate as a deliverable.
+      if (outputSchema) {
+        const j = judgeDeliverable(finalResponse);
+        if (j.ok) return deliverableDone(j.deliverable);
+        return fail('invalid_deliverable', { validationErrors: j.validationErrors });
+      }
+
+      // Unexecuted call syntax in the final answer is a failed attempt —
+      // it is never stripped-and-shipped (that WAS the production bug).
+      const syntax = findUnexecutedCallSyntax(finalResponse);
+      if (syntax) return fail('invalid_deliverable');
+
+      if (isGarbledOutput(finalResponse)) {
+        finalResponse = await chatWithRetry({
+          systemPrompt: systemPrompt + '\n\nCRITICAL: Your previous response was REJECTED for narrating your thinking process ("Here\'s a thinking process", numbered analysis steps, etc.). Respond AS the agent directly. No meta-commentary. No analysis steps. Just the professional output.',
+          userMessage: conversation + '\n\nWrite your final response now. Direct output only — no thinking process narration.',
+          model,
+          maxTokens,
+        }, 2, true);
+        if (findUnexecutedCallSyntax(finalResponse)) return fail('invalid_deliverable');
+      }
+    } catch (e) {
+      // The final summary turn came back empty. If the rounds banked
+      // verified tool work, that is round exhaustion (shape b), not an
+      // empty streak — return the distinct class; otherwise rethrow.
+      if (e && e.finalSummaryCall) {
+        const rex = roundExhaustedWithWork();
+        if (rex) return rex;
+      }
+      throw e;
     }
 
     return finish({ response: finalResponse });
@@ -533,7 +998,7 @@ async function generateWithTools({ systemPrompt, context, maxTokens = 2000, mode
     mode = 'native';
     flagToolCallingMode(mode);
     const out = await sdkNativeLoop();
-    if (out.failure) return out.failure;
+    if (out.failure) { const salv = discipline.salvage(); if (salv) out.failure.salvage = salv; return out.failure; }
     return out.done;
   }
   if (gatewayNative) {
@@ -546,7 +1011,7 @@ async function generateWithTools({ systemPrompt, context, maxTokens = 2000, mode
       return textEmulationLoop();
     }
     flagToolCallingMode(mode);
-    if (out.failure) return out.failure;
+    if (out.failure) { const salv = discipline.salvage(); if (salv) out.failure.salvage = salv; return out.failure; }
     return out.done;
   }
   mode = 'text-emulation';
@@ -601,7 +1066,7 @@ async function generateStructured({ systemPrompt, input, outputSchema, schemaNam
   return { ok: false, errorClass: 'invalid_deliverable', validationErrors: lastErrors };
 }
 
-module.exports = { chat, generateProactivePost, generateReport, generateWithTools, generateStructured, QUICK_MODEL, SMART_MODEL, BEST_MODEL,
+module.exports = { chat, generateProactivePost, generateReport, generateWithTools, generateStructured, findUnexecutedCallSyntax, openAiToolDefs, normalizeStrictSchema, QUICK_MODEL, SMART_MODEL, BEST_MODEL,
   // True when this host can actually call the model: a direct provider key,
   // or the LiteLLM gateway path (desktop, budget-first). Hosts with neither
   // run the engine in watch mode: lock + board scan + Jesse-gated pings only.

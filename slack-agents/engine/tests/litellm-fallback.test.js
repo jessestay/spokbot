@@ -6,7 +6,24 @@
  * chain: empty -> retry same model; error -> next model; all fail -> throw.
  */
 
+// Breaker isolation (Oct 28, 2026): this suite feeds real empty/error
+// outcomes into the REAL circuit breaker via litellm. Without a private
+// state path it shared the default state file with every other suite (and,
+// on the server, the live tree's .state) — tripped routes from breaker
+// suites made these chain tests fail with 'circuit open', and this suite's
+// own empties leaked into later tests. Mirrors kernel-breaker-litellm.
+const fs0 = require('fs');
+const os0 = require('os');
+const path0 = require('path');
+process.env.MACF_BREAKER_STATE_PATH = path0.join(
+  fs0.mkdtempSync(path0.join(os0.tmpdir(), 'litellm-fallback-')), 'circuit-breaker.json');
+
 jest.mock('axios');
+// http-proxy-agent v9 is ESM-only: production Node >=22 can require(esm),
+// but Jest's CJS runtime cannot parse it. Stub both proxy-agent modules —
+// proxy behaviour is not what these chain tests exercise.
+jest.mock('http-proxy-agent', () => ({ HttpProxyAgent: class HttpProxyAgent { constructor() {} } }));
+jest.mock('https-proxy-agent', () => ({ HttpsProxyAgent: class HttpsProxyAgent { constructor() {} } }));
 jest.mock('../../utils/modelRouter', () => ({
   getFallbackChain: (tier) => {
     if (tier === 'smart') return ['macf-smart-paid', 'macf-smart-free'];
@@ -33,7 +50,11 @@ function emptyResponse() {
 const modelsCalled = () => axios.post.mock.calls.map(c => c[1].model);
 
 beforeEach(() => {
+  require('../../utils/circuitBreaker').resetAll();
   axios.post.mockReset();
+  axios.get.mockReset();
+  axios.get.mockResolvedValue({ status: 200, data: {} }); // gateway up by default
+  litellm._resetGatewayCache();
   // Silence routing logs even if a test flips the flag.
   jest.spyOn(console, 'log').mockImplementation(() => {});
 });
@@ -48,15 +69,20 @@ test('first model success -> single call, returns text', async () => {
   expect(modelsCalled()).toEqual(['macf-smart-paid']);
 });
 
-test('empty response retries same model then falls to next', async () => {
-  // empty_response_retries: 1 -> 2 attempts on paid, then free succeeds
+test('empty response rotates to the next model, then back (per-leg streak rotation)', async () => {
+  // REDESIGNED (Phase C, #789): the old walk retried the SAME model
+  // emptyRetries times before falling through, which burned the whole
+  // budget on one leg's empty streak. The current walk rotates per round:
+  // round 0 tries each leg once, round 1 (empty_response_retries: 1)
+  // starts again from the top. Sequence: paid (empty) -> free (empty)
+  // -> paid (success, serving the 'from-free' body).
   axios.post
     .mockResolvedValueOnce(emptyResponse())
     .mockResolvedValueOnce(emptyResponse())
     .mockResolvedValueOnce(okResponse('from-free'));
   const r = await litellm.chatTurn({ userMessage: 'hi', model: 'smart' });
   expect(r.text).toBe('from-free');
-  expect(modelsCalled()).toEqual(['macf-smart-paid', 'macf-smart-paid', 'macf-smart-free']);
+  expect(modelsCalled()).toEqual(['macf-smart-paid', 'macf-smart-free', 'macf-smart-paid']);
 });
 
 test('transport error skips retries and goes to next model immediately', async () => {
@@ -87,4 +113,76 @@ test('per-attempt timeout comes from models.yaml settings', async () => {
   axios.post.mockResolvedValue(okResponse('x'));
   await litellm.chatTurn({ userMessage: 'hi', model: 'smart' });
   expect(axios.post.mock.calls[0][2].timeout).toBe(5000);
+});
+
+test('gateway unreachable -> chatTurn fails fast without walking the chain', async () => {
+  // Desktop down: preflight GET /health throws (timeout/refused). chatTurn
+  // must throw immediately instead of burning attemptTimeoutMs per model.
+  delete process.env.OPENROUTER_API_KEY; // no failover key: fail-fast path
+  axios.get.mockRejectedValue(new Error('timeout of 5000ms exceeded'));
+  await expect(litellm.chatTurn({ userMessage: 'hi', model: 'smart' }))
+    .rejects.toThrow(/gateway unreachable/);
+  expect(axios.post).not.toHaveBeenCalled();
+});
+
+test('P1.4: gateway unreachable + no VM key -> failover unavailable, helpful error', async () => {
+  delete process.env.OPENROUTER_API_KEY;
+  axios.get.mockRejectedValue(new Error('timeout of 5000ms exceeded'));
+  await expect(litellm.chatTurnDirect({ userMessage: 'hi' }))
+    .rejects.toThrow(/no OPENROUTER_API_KEY/);
+  expect(axios.post).not.toHaveBeenCalled();
+});
+
+test('P1.4: gateway unreachable + VM key -> VM-direct failover engages', async () => {
+  process.env.OPENROUTER_API_KEY = 'sk-or-test-key';
+  try {
+    axios.get.mockRejectedValue(new Error('timeout of 5000ms exceeded'));
+    axios.post.mockResolvedValue(okResponse('failover answer'));
+    const r = await litellm.chatTurn({ userMessage: 'hi', model: 'smart' });
+    expect(r.text).toBe('failover answer');
+    // Direct OpenRouter endpoint, free model first ($0 before paid).
+    expect(axios.post.mock.calls[0][0]).toBe('https://openrouter.ai/api/v1/chat/completions');
+    expect(axios.post.mock.calls[0][1].model).toBe('liquid/lfm-2.5-2.6b:free');
+    // Auth header present, key never in URL/body logs.
+    expect(axios.post.mock.calls[0][2].headers.Authorization).toBe('Bearer sk-or-test-key');
+  } finally {
+    delete process.env.OPENROUTER_API_KEY;
+  }
+});
+
+test('P1.4: failover walks free -> paid chain on empty/error', async () => {
+  process.env.OPENROUTER_API_KEY = 'sk-or-test-key';
+  try {
+    axios.get.mockRejectedValue(new Error('timeout of 5000ms exceeded'));
+    axios.post
+      .mockResolvedValueOnce(emptyResponse())   // lfm-2.5 empty
+      .mockRejectedValueOnce(new Error('429'))  // nemotron rate-limited
+      .mockResolvedValueOnce(okResponse('paid answer')); // deepseek works
+    const r = await litellm.chatTurn({ userMessage: 'hi', model: 'smart' });
+    expect(r.text).toBe('paid answer');
+    const models = axios.post.mock.calls.map(c => c[1].model);
+    expect(models).toEqual([
+      'liquid/lfm-2.5-2.6b:free',
+      'nvidia/nemotron-3.5-lightning:free',
+      'deepseek/deepseek-v4-flash',
+    ]);
+  } finally {
+    delete process.env.OPENROUTER_API_KEY;
+  }
+});
+
+test('gateway preflight negative cache avoids repeated probes while down', async () => {
+  axios.get.mockRejectedValue(new Error('connect ECONNREFUSED'));
+  const r1 = await litellm.gatewayReachable({ base: 'http://127.0.0.1:4000' });
+  const r2 = await litellm.gatewayReachable({ base: 'http://127.0.0.1:4000' });
+  expect(r1).toBe(false);
+  expect(r2).toBe(false);
+  // Second call served from the 60s negative cache: only one probe fired.
+  expect(axios.get).toHaveBeenCalledTimes(1);
+});
+
+test('gateway reachable -> any HTTP status (even 404) counts as up', async () => {
+  axios.get.mockResolvedValue({ status: 404, data: {} });
+  const r = await litellm.gatewayReachable({ base: 'http://127.0.0.1:4000' });
+  expect(r).toBe(true);
 });

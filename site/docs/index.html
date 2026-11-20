@@ -1,0 +1,113 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Ship's Library — Spokbot Documentation</title>
+<meta name="description" content="The Spokbot ship's library: architecture, setup, model routing, the verification spec, and every user story — straight from the repository. Computer, access the files.">
+<link rel="stylesheet" href="../assets/style.css">
+<link rel="icon" type="image/svg+xml" href="../assets/mascot.svg">
+</head>
+<body>
+<div class="frame">
+  <div class="rail" aria-hidden="true"></div>
+  <div class="main">
+
+    <header class="top">
+      <a class="logo" href="../">Spok<span class="dot">bot</span></a>
+      <nav class="pills">
+        <a href="../">Bridge</a>
+        <a href="./">Ship's Library</a>
+        <a href="../support/">Support the Mission</a>
+        <a href="https://github.com/jessestay/spokbot">GitHub</a>
+      </nav>
+    </header>
+
+    <div class="hero">
+      <p class="stardate">Ship's Library — Computer, Access the Files</p>
+      <h1>Documentation, <em>straight from the source</em></h1>
+      <p class="lede">On this crew, documentation isn't a summary somebody wrote
+      about the work — it links to the work itself. Every text below is a real
+      file in the repository. The computer does not paraphrase. The computer
+      does not improvise. The computer retrieves.</p>
+    </div>
+
+    <section>
+      <h2>Start Here <span class="accent">— Orientation</span></h2>
+      <ul class="doclist">
+        <li>
+          <a href="https://github.com/jessestay/spokbot/blob/main/README.md">README — Mission Briefing</a>
+          <p>What Spokbot is, why it exists, the crew roster, and how the pieces fit. Your first stop on the tour.</p>
+        </li>
+        <li>
+          <a href="https://github.com/jessestay/spokbot/blob/main/SETUP.md">SETUP — Boarding Procedures</a>
+          <p>The full setup guide: backends, shared memory, deployment, and the live smoke test.</p>
+        </li>
+        <li>
+          <a href="https://github.com/jessestay/spokbot/blob/main/AGENT_SETUP.md">AGENT_SETUP — Crew Assignments</a>
+          <p>How agents are defined, granted tools, and put to work.</p>
+        </li>
+      </ul>
+    </section>
+
+    <section>
+      <h2>Engineering <span class="accent">— How the Ship Works</span></h2>
+      <ul class="doclist">
+        <li>
+          <a href="https://github.com/jessestay/spokbot/blob/main/ARCHITECTURE.md">ARCHITECTURE — Schematics</a>
+          <p>The full design: platform adapters, the core layer, and the production engine in <span class="mono">slack-agents/</span>.</p>
+        </li>
+        <li>
+          <a href="https://github.com/jessestay/spokbot/blob/main/MODELS.md">MODELS — Choosing a Warp Core</a>
+          <p>Model switching in plain English: three tiers (Quick, Smart, Best), a free local default, and what upgrades actually cost.</p>
+        </li>
+        <li>
+          <a href="https://github.com/jessestay/spokbot/blob/main/docs/routing/llm-management.md">LLM Management — Routing &amp; the Gateway</a>
+          <p>How requests are routed through the self-hosted LiteLLM gateway, and how local and hosted models share the load.</p>
+        </li>
+        <li>
+          <a href="https://github.com/jessestay/spokbot/blob/main/hands/ARCHITECTURE.md">Hands — The Tool Deck</a>
+          <p>The MCP servers and grants system: how tools reach agents, and how the dangerous ones stay behind explicit owner decisions.</p>
+        </li>
+      </ul>
+    </section>
+
+    <section>
+      <h2>The Law <span class="accent">— Verification</span></h2>
+      <ul class="doclist">
+        <li>
+          <a href="https://github.com/jessestay/spokbot/blob/main/MACF-DEFINITION-AND-VERIFICATION-SPEC.md">Definition &amp; Verification Spec</a>
+          <p>The constitution of the project: every function, the outcome that counts for each, and the standard the system is audited against. This is the document that currently keeps us at yellow alert — by design.</p>
+        </li>
+        <li>
+          <a href="https://github.com/jessestay/spokbot/blob/main/EXECUTION-KERNEL-SPEC.md">Execution Kernel Spec</a>
+          <p>How directives become delegations, delegations become receipts, and receipts become — or fail to become — "done."</p>
+        </li>
+        <li>
+          <a href="https://github.com/jessestay/spokbot/tree/main/stories">User Stories — The Ship's Log, In Advance</a>
+          <p>Every unit of work is a story — "As a …", Given/When/Then, a difficulty score — built BDD-first, then TDD. Read what the crew has sworn to, in writing.</p>
+        </li>
+      </ul>
+    </section>
+
+    <section>
+      <h2>A Note on Sources</h2>
+      <p>This library links to the repository because the repository is where the
+      truth lives. If a page here ever disagrees with the code, believe the code —
+      and <a href="https://github.com/jessestay/spokbot/issues">file an issue</a>
+      so the page gets corrected. Discrepancies are treated as defects, not as
+      marketing opportunities.</p>
+    </section>
+
+    <footer>
+      <p><strong>Spokbot</strong> — Apache-2.0. <a href="../">Back to the bridge</a> ·
+      <a href="../support/">Support the mission</a> ·
+      <a href="https://github.com/jessestay/spokbot">GitHub</a></p>
+      <p>An independent parody-flavored open-source project. Not affiliated with
+      Paramount/CBS or xAI. The computer confirms this is accurate.</p>
+    </footer>
+
+  </div>
+</div>
+</body>
+</html>

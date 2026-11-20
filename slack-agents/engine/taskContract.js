@@ -120,6 +120,69 @@ const templates = {
       maxAttempts: 3,
     });
   },
+
+  // The floor contract (M3, Vikunja #771): the minimum bar for ANY
+  // task — it may be marked done only when the receipts ledger shows
+  // at least one successful tool execution under the task. Creators
+  // who know the deliverable's shape stamp a richer template instead;
+  // this is what a task gets when its creator stamped nothing.
+  verifiedWork({ taskId } = {}) {
+    return normalizeContract({
+      taskId,
+      executor: null,
+      requiredTools: [],
+      postconditions: [{ type: 'receipt_count', tool: '*', status: 'ok', min: 1 }],
+      deliverable: { schema: 'generic@v1' },
+      maxAttempts: 3,
+    });
+  },
 };
 
-module.exports = { parseContract, renderContractBlock, stampContract, normalizeContract, templates };
+/**
+ * Creation-time stamping (M3): if the description carries no parseable
+ * contract, stamp the floor contract; if it carries one, return the
+ * description untouched. Idempotent. Called by the task-creation path
+ * (utils/vikunja.createTask) so every task born through the team's own
+ * tooling is contracted from birth — the adoption step #724 missed.
+ */
+function ensureContract(description) {
+  const text = String(description || '');
+  if (parseContract(text)) return text;
+  return stampContract(text, templates.verifiedWork({}));
+}
+
+/**
+ * Slack transports HTML-escape message text: a MACF-CONTRACT block posted
+ * to Slack comes back as &lt;!-- MACF-CONTRACT ... --&gt;, which the
+ * literal BLOCK_RE in parseContract can never match (#925 round 4 -
+ * the round-3 contract merge was inert in production for exactly this
+ * reason). parseContract itself stays untouched - the Vikunja path feeds
+ * it unescaped text - so Slack-path callers unescape a COPY first.
+ * &amp; is replaced LAST so an escaped escape (&amp;lt;) decodes once.
+ */
+function unescapeEntities(text) {
+  if (!text || typeof text !== 'string') return text;
+  return text
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'")
+    .replace(/&amp;/g, '&');
+}
+
+/**
+ * Per-directive tool-round budget (#925 round 4): a contract may declare
+ * params.maxToolRounds when the generateWithTools default budget (6) is
+ * too small for the task class - the weekly content batch spent its
+ * rounds on required reading + research and never reached a fileWrite.
+ * Reads the contract from raw OR Slack-escaped text. Returns a clamped
+ * integer, or null when the directive carries no usable value.
+ */
+function directiveToolRounds(text) {
+  const contract = parseContract(unescapeEntities(text));
+  const n = contract && contract.params ? Number(contract.params.maxToolRounds) : NaN;
+  if (!Number.isInteger(n) || n < 1) return null;
+  return Math.min(n, 32);
+}
+
+module.exports = { parseContract, renderContractBlock, stampContract, normalizeContract, templates, ensureContract, unescapeEntities, directiveToolRounds };

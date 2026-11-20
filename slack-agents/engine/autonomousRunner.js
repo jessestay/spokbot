@@ -3,8 +3,13 @@
 //
 // JESSE'S LAW: Every agent with active tasks must produce verifiable output
 // every hour. Agents were passive — they only responded to Slack directives.
-// This runner calls each agent's runAutonomous() hourly, independent of Slack,
-// generating verifiable artifacts that the sprint demo check counts as demos.
+// This runner calls each agent's runAutonomous() hourly, independent of Slack.
+//
+// HONESTY NOTE (Oct 12, 2026): these are HEALTH-CHECK pulses, not demos.
+// runAutonomous() does "no LLM calls — just artifact generation with current
+// status." A demo is task-linked output with evidence (see workEngine.js).
+// These pulses keep agents visibly alive; they are labeled [health-check]
+// so no monitor mistakes them for deliverables.
 //
 // Run hourly via cron. Each agent's runAutonomous() is idempotent and fast
 // (no LLM calls — just artifact generation with current status).
@@ -16,12 +21,12 @@ require('dotenv').config({ path: require('path').join(__dirname, '..', '.env') }
 
 const AGENTS = ['cfo', 'cmo', 'cro', 'execPM', 'facebook', 'cto', 'lawyer', 'jobcoach', 'cco', 'cuxo', 'hr'];
 
-// ROOT CAUSE FIX (Oct 10, 2026): The runner generated local files but never
-// posted to Slack. The sprint demo checker looks in Slack for demos, so agents
-// appeared silent despite doing work. Now each successful run posts a demo
-// to Slack in the detectable format.
-// Update .agent-health.json so sprintDemo.js detects the demo.
-// The checker looks for lastActivity within the last hour + directivesCompleted > 0.
+// ROOT CAUSE FIX (Oct 10, 2026), CORRECTED Oct 12, 2026: the runner used to
+// post these pulses as [DEMO] and the sprint demo checker counted them as
+// demos — every check reported green while zero real work shipped. Pulses are
+// now labeled [health-check]: visible heartbeat, never demo evidence.
+// Update .agent-health.json so liveness monitoring still sees the agents.
+// (The sprint demo check reads work-engine lastDemo state, not this file.)
 function updateAgentHealth(agentId) {
   try {
     const fs = require('fs');
@@ -47,7 +52,11 @@ async function postDemoToSlack(agentId, artifactPath) {
     let token;
     try {
       const fetch = `import sys
-sys.path.insert(0, '/opt/hatch/skills/skill-creator/bin')
+import os as _os
+for _p in ('/opt/hatch/skills/skill-creator/bin', '/opt/muse/skills/custom-connector-setup/bin', '/opt/hatch/workflow-skills/custom-connector-setup/bin'):
+    if _os.path.exists(_p + '/dynamic_credentials.py'):
+        sys.path.insert(0, _p)
+        break
 from dynamic_credentials import dynamic_credential_entry
 entry = dynamic_credential_entry('custom.slack')
 sys.stdout.write(entry['surrogate'])`;
@@ -57,13 +66,14 @@ sys.stdout.write(entry['surrogate'])`;
       return;
     }
     const client = new WebClient(token);
-    // Post to #management (agent activity channel)
+    // Post to #management (agent activity channel). Labeled [health-check],
+    // NOT [DEMO] — a status pulse is not a deliverable (Oct 12, 2026).
     const channel = 'C0ASDH1HC1Y';
-    const message = `[FYI] [DEMO] ${agentId} hourly autonomous run complete\n` +
+    const message = `[FYI] [health-check] ${agentId} hourly status pulse\n` +
       `Artifact: ${artifactPath}\n` +
       `Generated: ${new Date().toISOString()}`;
     await client.chat.postMessage({ channel, text: message });
-    console.log(`[autonomousRunner] ${agentId}: demo posted to Slack`);
+    console.log(`[autonomousRunner] ${agentId}: health-check pulse posted to Slack`);
   } catch (e) {
     console.error(`[autonomousRunner] ${agentId}: Slack post failed: ${e.message}`);
     // Don't fail the run — local artifact is the primary output
@@ -86,7 +96,7 @@ async function main() {
       }
       const result = await agent.runAutonomous();
       console.log(`[autonomousRunner] ✅ ${agentId}: ${result.artifactPath}`);
-      // Post demo to Slack so the sprint demo checker detects it
+      // Post health-check pulse to Slack (liveness only — not a demo).
       await postDemoToSlack(agentId, result.artifactPath);
       // Update agent health file so sprintDemo.js detects the demo
       // (It checks .agent-health.json for lastActivity + directivesCompleted)

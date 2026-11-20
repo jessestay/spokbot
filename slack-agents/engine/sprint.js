@@ -21,9 +21,82 @@
 
 const fs = require('fs');
 const path = require('path');
+require('dotenv').config({ path: path.join(__dirname, '..', '.env') });
 
 const CONFIG_PATH = path.join(__dirname, 'scrum-config.json');
 const SPRINT_STATE = path.join(__dirname, '.sprint-state.json');
+
+// Newborn-sprint guard: never review a sprint younger than this, so a
+// coincident sprint-review run can't kill the sprint the planner just opened
+// (both jobs fire on the same 12h phase). Oct 11, 2026.
+const MIN_SPRINT_AGE_MS = 60 * 60 * 1000;
+
+/**
+ * Fetch the prioritized Vikunja backlog (all projects, open tasks only).
+ * Wired Oct 11, 2026 — replaces the empty stub (plan used to plan 0 priorities).
+ */
+async function fetchBacklog() {
+  const url = process.env.VIKUNJA_URL || 'http://127.0.0.1:3456';
+  const token = process.env.VIKUNJA_TOKEN;
+  if (!token) { console.log('[sprint] VIKUNJA_TOKEN missing — planning with empty backlog'); return []; }
+  try {
+    const pr = await fetch(`${url}/api/v2/projects?per_page=100`, { headers: { Authorization: `Bearer ${token}` } });
+    if (!pr.ok) { console.log('[sprint] backlog fetch failed:', pr.status); return []; }
+    const projects = ((await pr.json()).items) || [];
+    const out = [];
+    for (const p of projects) {
+      const tr = await fetch(`${url}/api/v2/projects/${p.id}/tasks?per_page=300`, { headers: { Authorization: `Bearer ${token}` } });
+      if (!tr.ok) continue;
+      const tasks = ((await tr.json()).items) || [];
+      for (const t of tasks) {
+        if (t.done) continue;
+        out.push({
+          id: t.id,
+          title: t.title,
+          priority: t.priority,
+          done: false,
+          project: p.title,
+          due: t.due_date,
+          assignees: (t.assignees || []).map(a => a.username).join(','),
+        });
+      }
+    }
+    return out;
+  } catch (e) {
+    console.log('[sprint] backlog fetch error:', e.message);
+    return [];
+  }
+}
+
+/**
+ * Tasks completed since the sprint started (for an honest review).
+ */
+async function fetchCompletedSince(sinceISO) {
+  const url = process.env.VIKUNJA_URL || 'http://127.0.0.1:3456';
+  const token = process.env.VIKUNJA_TOKEN;
+  if (!token) return [];
+  try {
+    const pr = await fetch(`${url}/api/v2/projects?per_page=100`, { headers: { Authorization: `Bearer ${token}` } });
+    if (!pr.ok) return [];
+    const projects = ((await pr.json()).items) || [];
+    const since = new Date(sinceISO).getTime();
+    const done = [];
+    for (const p of projects) {
+      const tr = await fetch(`${url}/api/v2/projects/${p.id}/tasks?per_page=300`, { headers: { Authorization: `Bearer ${token}` } });
+      if (!tr.ok) continue;
+      const tasks = ((await tr.json()).items) || [];
+      for (const t of tasks) {
+        if (t.done && t.updated && new Date(t.updated).getTime() >= since) {
+          done.push({ id: t.id, title: t.title, updated: t.updated });
+        }
+      }
+    }
+    return done;
+  } catch (e) {
+    console.log('[sprint] completed-fetch error:', e.message);
+    return [];
+  }
+}
 
 function loadConfig() {
   try {
@@ -156,8 +229,14 @@ async function main() {
   const state = loadSprintState();
 
   if (mode === 'plan') {
-    // In production: fetch backlog from Vikunja here
-    const sprint = planSprint([], config);
+    // Real backlog from Vikunja (wired Oct 11, 2026).
+    const backlog = await fetchBacklog();
+    // Never orphan an in-flight sprint: archive the previous one first.
+    if (state.currentSprint) {
+      const prevDone = await fetchCompletedSince(state.currentSprint.startedAt);
+      state.history.push(reviewSprint(state.currentSprint, prevDone));
+    }
+    const sprint = planSprint(backlog, config);
     state.currentSprint = sprint;
     saveSprintState(state);
     console.log('[SPRINT-PLAN]');
@@ -167,7 +246,15 @@ async function main() {
       console.log('[sprint] No active sprint to review');
       return;
     }
-    const review = reviewSprint(state.currentSprint, []);
+    const ageMs = Date.now() - new Date(state.currentSprint.startedAt).getTime();
+    if (ageMs < MIN_SPRINT_AGE_MS) {
+      // A coincident review run (same 12h phase as planning) must not
+      // close a newborn sprint; it will be reviewed at the next cycle.
+      console.log(`[sprint] Sprint ${state.currentSprint.id} is only ${Math.round(ageMs / 60000)} min old — skipping review (min age 60 min)`);
+      return;
+    }
+    const completed = await fetchCompletedSince(state.currentSprint.startedAt);
+    const review = reviewSprint(state.currentSprint, completed);
     state.history.push(review);
     state.currentSprint = null;
     saveSprintState(state);
@@ -180,4 +267,4 @@ if (require.main === module) {
   main().catch(e => { console.error(e); process.exit(1); });
 }
 
-module.exports = { planSprint, reviewSprint, formatPlanning, formatReview, loadConfig };
+module.exports = { planSprint, reviewSprint, formatPlanning, formatReview, loadConfig, fetchBacklog, fetchCompletedSince };

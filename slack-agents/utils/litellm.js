@@ -21,6 +21,17 @@
 const axios = require('axios');
 const { HttpsProxyAgent } = require('https-proxy-agent');
 const { getFallbackChain, loadConfig } = require('./modelRouter');
+// Phase C circuit breaker (#789, Oct 16, 2026): cross-call per-route empty
+// streaks. The gateway passes empty 200s through as success (A5.3), so this
+// app layer is the only place a streak can be detected and routed around.
+const breaker = require('./circuitBreaker');
+// Phase D prompt caching (#789, Oct 16, 2026): cache_control breakpoints on
+// the stable prefix + one stable session_id per delegation (OpenRouter
+// sticky routing), and cached-token parsing in usage. All construction and
+// parsing lives in utils/promptCache.js; this client only wires it in when
+// a caller supplies a sessionId — without one the wire format is exactly
+// what it was before Phase D.
+const promptCache = require('./promptCache');
 
 // Tier routing settings come from config/models.yaml. The engine walks each
 // tier's chain top-down: on empty response it retries the same model
@@ -35,6 +46,7 @@ function routerSettings() {
   return {
     emptyRetries: Number.isInteger(s.empty_response_retries) ? s.empty_response_retries : 2,
     attemptTimeoutMs: Number.isInteger(s.model_timeout_ms) ? s.model_timeout_ms : 60000,
+    localTimeoutMs: Number.isInteger(s.local_timeout_ms) ? s.local_timeout_ms : null,
     logRouting: s.log_routing !== false,
   };
 }
@@ -138,8 +150,51 @@ async function gatewayReachable({ base, agent, timeoutMs = 5000 }) {
   }
 }
 
-// One attempt against one model id. Returns { text, toolCalls } — either may
-// be empty (caller decides retry vs fallback).
+// Normalize a provider usage block to the turn shape the checkpoint
+// token counters accumulate (Phase A, US-A1). Phase D: parsing is
+// promptCache.parseUsage, which also understands cached tokens in every
+// provider shape (OpenAI prompt_tokens_details.cached_tokens, DeepSeek
+// prompt_cache_hit_tokens, Anthropic cache_read/cache_creation). The
+// cached fields are added LAZILY — only when the provider actually
+// reported cache data — so consumers see the exact pre-Phase-D shape
+// { promptTokens, completionTokens } whenever no caching happened.
+// Returns undefined when the provider reported no usage.
+function normalizeUsage(raw) {
+  const u = promptCache.parseUsage(raw);
+  if (!u) return undefined;
+  const out = { promptTokens: u.promptTokens, completionTokens: u.completionTokens };
+  if (raw && typeof raw === 'object') {
+    const reportedCache =
+      raw.cachedTokens !== undefined || raw.cacheCreationTokens !== undefined ||
+      raw.prompt_cache_hit_tokens !== undefined ||
+      (raw.prompt_tokens_details && raw.prompt_tokens_details.cached_tokens !== undefined) ||
+      raw.cache_read_input_tokens !== undefined || raw.cache_creation_input_tokens !== undefined;
+    if (reportedCache) {
+      out.cachedTokens = u.cachedTokens;
+      if (u.cacheCreationTokens) out.cacheCreationTokens = u.cacheCreationTokens;
+    }
+  }
+  return out;
+}
+
+// Phase D wiring (US-D1): when a caller supplies a sessionId, build the
+// cache-annotated body parts and the session_id for sticky routing.
+// Returns null when caching does not apply (no sessionId, or the
+// MACF_PROMPT_CACHE=off ops kill switch) — the caller then sends the body
+// exactly as built, byte-identical to before Phase D. Mode resolution:
+// explicit cacheMode > MACF_CACHE_MODE env > 'full'.
+function buildCacheWiring({ sessionId, cacheMode, messages, tools }) {
+  if (!sessionId) return null;
+  if (process.env.MACF_PROMPT_CACHE === 'off') return null;
+  const mode = cacheMode || process.env.MACF_CACHE_MODE || 'full';
+  if (mode === 'off') return null;
+  const applied = promptCache.applyPromptCache({ messages, tools, sessionId, mode });
+  if (!applied.sessionId) return null;
+  return { ...applied, mode };
+}
+
+// One attempt against one model id. Returns { text, toolCalls, usage? } —
+// text/toolCalls may be empty (caller decides retry vs fallback).
 async function attemptOnce({ base, agent, modelName, body, signal, timeoutMs }) {
   const resp = await axios.post(`${base}/v1/chat/completions`, { ...body, model: modelName }, {
     headers: { Authorization: `Bearer ${process.env.LITELLM_MASTER_KEY}` },
@@ -157,18 +212,39 @@ async function attemptOnce({ base, agent, modelName, body, signal, timeoutMs }) 
   const toolCalls = [];
   for (const tc of (msg && msg.tool_calls) || []) {
     let args = {};
-    try { args = JSON.parse(tc.function.arguments || '{}'); } catch (e) { /* keep {} */ }
-    toolCalls.push({ id: tc.id, toolName: tc.function.name, args });
+    let argsParseError = null;
+    try { args = JSON.parse(tc.function.arguments || '{}'); } catch (e) {
+      // #925 (Nov 2, 2026): a tool call whose arguments string is not valid
+      // JSON — the usual cause is the provider truncating a very large
+      // argument payload mid-string (observed live: the CCO's full-batch
+      // fileWrite calls arrived with NO arguments at all) — used to
+      // degrade SILENTLY to {}. The tool then failed with a misleading
+      // "missing required arguments" and the model could not tell its call
+      // had been truncated, so it retried the same oversized call. Flag it
+      // instead: generateWithTools turns the flag into an actionable
+      // invalid_input correction (split the payload) and never executes
+      // the call with empty args.
+      argsParseError = { rawBytes: (tc.function && typeof tc.function.arguments === 'string') ? tc.function.arguments.length : 0 };
+      console.log(`[litellm] tool-call arguments for ${tc.function && tc.function.name} failed JSON.parse (${argsParseError.rawBytes} bytes) — flagging argsParseError; the call will not execute with empty args`);
+    }
+    toolCalls.push({ id: tc.id, toolName: tc.function.name, args, ...(argsParseError ? { argsParseError } : {}) });
   }
-  return { text, toolCalls };
+  const usage = normalizeUsage(resp.data && resp.data.usage);
+  // Phase D measurement: surface which model actually answered (the
+  // gateway runs its own fallback chain inside one alias, so the leg name
+  // alone cannot attribute cache behavior to a provider).
+  const answeredBy = resp.data && typeof resp.data.model === 'string' ? resp.data.model : undefined;
+  return { text, toolCalls, ...(usage ? { usage } : {}), ...(answeredBy ? { model: answeredBy } : {}) };
 }
 
 // Single chat turn with optional OpenAI-style tools. Returns
-// { text, toolCalls: [{ id, toolName, args }] }. This is what the MCP
-// ReAct loop uses: the loop appends tool results and calls again.
+// { text, toolCalls: [{ id, toolName, args }], usage? } — usage is the
+// provider's token accounting for the turn when it reported any
+// (Phase A, US-A1). This is what the MCP ReAct loop uses: the loop
+// appends tool results and calls again.
 //
 // Walks the tier's fallback chain top-down (see routerSettings above).
-async function chatTurn({ systemPrompt, userMessage, messages, model = 'smart', maxTokens = 1200, tools, toolChoice = 'auto', signal, responseFormat }) {
+async function chatTurn({ systemPrompt, userMessage, messages, model = 'smart', maxTokens = 1200, tools, toolChoice = 'auto', signal, responseFormat, sessionId, cacheMode }) {
   if (!isConfigured()) {
     throw new Error('litellm not configured');
   }
@@ -190,7 +266,7 @@ async function chatTurn({ systemPrompt, userMessage, messages, model = 'smart', 
   // failing fast — the team's brain must not die with Jesse's desktop.
   if (!(await gatewayReachable({ base, agent }))) {
     if (logRouting) console.log('[litellm] desktop gateway unreachable — engaging VM-direct OpenRouter failover');
-    return chatTurnDirect({ systemPrompt, userMessage, messages, maxTokens, tools });
+    return chatTurnDirect({ systemPrompt, userMessage, messages, maxTokens, tools, sessionId, cacheMode });
   }
   const chain = resolveChain(model); // tier shorthand or full model id
   const body = {
@@ -213,27 +289,103 @@ async function chatTurn({ systemPrompt, userMessage, messages, model = 'smart', 
     // the chain falls through.
     body.response_format = responseFormat;
   }
+  // Phase D (US-D1): cache construction on the stable prefix + session_id
+  // for sticky routing, only when the caller supplied a session. The
+  // caller's own message array is never mutated (applyPromptCache copies).
+  const cacheWiring = buildCacheWiring({ sessionId, cacheMode, messages: body.messages, tools: body.tools });
+  if (cacheWiring) {
+    body.messages = cacheWiring.messages;
+    if (body.tools) body.tools = cacheWiring.tools;
+    body.session_id = cacheWiring.sessionId;
+  }
   const errors = [];
-  for (const modelName of chain) {
-    for (let attempt = 0; attempt <= emptyRetries; attempt++) {
+  let emptyCount = 0;
+  // EMPTY-STREAK FIX (Oct 21, 2026): sticky routing pins this call to one
+  // upstream instance per session_id. An empty reply indicts the pinned
+  // instance, not the request — a retry that keeps the same session_id
+  // can empty for the whole call (and every leg of it, since the session
+  // rides the shared body) while fresh sessions succeed. On an empty,
+  // rotate to a FRESH session_id for subsequent attempts; the first
+  // attempt keeps the caller's stable id so the healthy path keeps its
+  // cache locality. Breaker accounting is untouched: empties still count.
+  let sessionRotations = 0;
+  const rotateSessionAfterEmpty = (modelName) => {
+    if (!cacheWiring || !cacheWiring.sessionId) return;
+    sessionRotations++;
+    body.session_id = `${cacheWiring.sessionId}:rot${sessionRotations}`;
+    if (logRouting) console.log(`[litellm] rotating session after empty from ${modelName}: ${cacheWiring.sessionId} -> ${body.session_id}`);
+  };
+  // RESILIENCE (Oct 15, 2026 — Jesse's order after the evening dead-letter
+  // streak): empty responses arrive in PER-LEG streaks. The old walk hammered
+  // one model emptyRetries times in a row, so a streak on the top leg burned
+  // the whole call budget in seconds while the other leg sat idle. Now the
+  // attempts ROTATE across the chain with escalating spacing, so each attempt
+  // gets a different leg and a streak has time to break mid-call. A model
+  // that errors (transport/4xx/5xx) is marked down for the rest of this call
+  // and skipped in later rotations.
+  const downModels = new Set();
+  const delayBaseMs = Number(process.env.MACF_EMPTY_RETRY_DELAY_MS || 1000);
+  let attemptNo = 0;
+  let attemptedAny = false;
+  const breakerSkipped = new Set();
+  for (let round = 0; round <= emptyRetries; round++) {
+    for (const modelName of chain) {
+      if (downModels.has(modelName)) continue;
+      // CIRCUIT BREAKER: a route in an empty streak is skipped instantly
+      // instead of burning an attempt (and up to attemptTimeoutMs) on it.
+      if (breaker.shouldSkip(modelName)) {
+        breakerSkipped.add(modelName);
+        if (logRouting) console.log(`[litellm] circuit OPEN for ${modelName} — skipping (fail-fast)`);
+        continue;
+      }
+      attemptNo++;
+      attemptedAny = true;
+      if (signal && signal.aborted) throw new Error('litellm: aborted');
+      if (attemptNo > 1 && delayBaseMs > 0) {
+        const delay = Math.min(delayBaseMs * Math.pow(2, attemptNo - 2), delayBaseMs * 8);
+        await new Promise(r => setTimeout(r, delay));
+      }
       try {
-        if (logRouting) console.log(`[litellm] trying ${modelName} (attempt ${attempt + 1}/${emptyRetries + 1})`);
-        const { text, toolCalls } = await attemptOnce({ base, agent, modelName, body, signal, timeoutMs: attemptTimeoutMs });
+        if (logRouting) console.log(`[litellm] trying ${modelName} (attempt ${attemptNo}, rotation ${round + 1}/${emptyRetries + 1})`);
+        // #807 Phase 1: local routes (desktop Ollama) get a longer attempt
+        // budget — a cold model load + CPU prompt evaluation legitimately
+        // exceeds the 60s cloud budget; dying at 60s made the local
+        // lifeboat unusable for delegation payloads. models.yaml
+        // settings.local_timeout_ms (default: same as attemptTimeoutMs).
+        const isLocalRoute = modelName === 'macf-local' || modelName === 'macf-cheap';
+        const timeoutMs = isLocalRoute ? (Number(routerSettings().localTimeoutMs) || attemptTimeoutMs) : attemptTimeoutMs;
+        const { text, toolCalls, usage, model: answeredBy } = await attemptOnce({ base, agent, modelName, body, signal, timeoutMs });
         if (text || toolCalls.length > 0) {
+          breaker.recordSuccess(modelName);
           if (logRouting && modelName !== chain[0]) console.log(`[litellm] fallback engaged: ${chain[0]} -> ${modelName}`);
-          return { text, toolCalls };
+          // Phase A (US-A1): surface the turn's token usage so callers can
+          // accumulate it into the run's checkpoint token counters. Phase D:
+          // the cache descriptor (session + prefix fingerprint + mode) rides
+          // along so measurement can attribute hits to a layout.
+          return { text, toolCalls, route: modelName, ...(usage ? { usage } : {}), ...(answeredBy ? { model: answeredBy } : {}), ...(cacheWiring ? { cache: { sessionId: cacheWiring.sessionId, prefixHash: cacheWiring.prefixHash, mode: cacheWiring.mode } } : {}) };
         }
-        if (logRouting) console.log(`[litellm] empty response from ${modelName}, retrying...`);
+        emptyCount++;
+        breaker.recordEmpty(modelName);
+        if (logRouting) console.log(`[litellm] empty response from ${modelName}, rotating...`);
+        rotateSessionAfterEmpty(modelName);
       } catch (e) {
-        // Transport/model error (timeout, 4xx, 5xx): don't burn empty-retries
-        // on a model that's failing — fall through to the next in the chain.
         errors.push(`${modelName}: ${e.message}`);
-        if (logRouting) console.log(`[litellm] ${modelName} failed (${e.message}) — falling back`);
-        break;
+        if (logRouting) console.log(`[litellm] ${modelName} failed (${e.message}) — marked down for this call`);
+        downModels.add(modelName);
       }
     }
   }
-  throw new Error(`litellm: all models failed for '${model}' [${chain.join(' -> ')}]: ${errors.join('; ').slice(0, 300)}`);
+  // FAIL-FAST (Phase C): every route in the chain was breaker-skipped and
+  // not a single gateway call was made. Surface a distinct circuit-open
+  // error so callers (step retry, dead-letter) get an instant, schedulable
+  // failure instead of a minutes-long stall into dead routes.
+  if (!attemptedAny && breakerSkipped.size > 0) {
+    const err = new Error(`litellm: circuit open for all routes in chain [${chain.join(' -> ')}] — failing fast, no gateway calls made (empty-response streak cooldown)`);
+    err.circuitOpen = true;
+    throw err;
+  }
+  const detail = errors.length ? errors.join('; ') : `${emptyCount} empty response(s), no transport errors`;
+  throw new Error(`litellm: all models failed for '${model}' [${chain.join(' -> ')}]: ${detail.slice(0, 300)}`);
 }
 
 // P1.4 (Oct 12, 2026) — VM-direct OpenRouter failover.
@@ -244,8 +396,9 @@ async function chatTurn({ systemPrompt, userMessage, messages, model = 'smart', 
 // the tracked gateway config (proxies/litellm_config.yaml).
 //
 // Requires OPENROUTER_API_KEY in the VM env. The funded key lives on the
-// desktop gateway (C:\Users\stay\claude_proxy\macf_gateway.env); copy it to
-// the VM when the desktop is reachable. Without the key, the fail-fast error
+// desktop gateway (the claude_proxy/macf_gateway.env file on the
+// operator's desktop); copy it to the VM when the desktop is reachable.
+// Without the key, the fail-fast error
 // is preserved so the retry/dead-letter machinery still advances.
 //
 // NOTE: the direct path does not support tools — callers get text only.
@@ -262,7 +415,7 @@ const DIRECT_FAILOVER_CHAIN = [
   { id: 'deepseek/deepseek-v4-flash',         reasoning: { enabled: false } },   // paid backup (funded)
 ];
 
-async function chatTurnDirect({ systemPrompt, userMessage, messages, maxTokens = 1200, tools }) {
+async function chatTurnDirect({ systemPrompt, userMessage, messages, maxTokens = 1200, tools, sessionId, cacheMode }) {
   const key = (process.env.OPENROUTER_API_KEY || '').trim();
   if (!key) {
     throw new Error('litellm: desktop gateway unreachable and no OPENROUTER_API_KEY on VM — cannot fail over (copy the funded key from the desktop gateway env to the VM)');
@@ -286,8 +439,37 @@ async function chatTurnDirect({ systemPrompt, userMessage, messages, maxTokens =
     ],
     max_tokens: maxTokens,
   };
+  // Phase D (US-D1): the direct OpenRouter path gets the same cache
+  // construction + session_id — OpenRouter documents session_id as its
+  // sticky-routing key, so the direct chain is where it is most native.
+  const cacheWiring = buildCacheWiring({ sessionId, cacheMode, messages: body.messages, tools: body.tools });
+  if (cacheWiring) {
+    body.messages = cacheWiring.messages;
+    body.session_id = cacheWiring.sessionId;
+  }
+  // EMPTY-STREAK FIX (Oct 21, 2026): same rotation as the gateway path —
+  // an empty on the direct chain rotates the session_id so the next model
+  // in the chain is not sticky-pinned to the same upstream instance.
+  let directSessionRotations = 0;
+  const rotateDirectSessionAfterEmpty = () => {
+    if (!cacheWiring || !cacheWiring.sessionId) return;
+    directSessionRotations++;
+    body.session_id = `${cacheWiring.sessionId}:rot${directSessionRotations}`;
+    console.log(`[litellm] rotating session after empty (direct): -> ${body.session_id}`);
+  };
   const errors = [];
+  let directAttemptedAny = false;
+  let directSkipped = 0;
   for (const { id: modelId, reasoning } of DIRECT_FAILOVER_CHAIN) {
+    // CIRCUIT BREAKER (Phase C): the direct chain streaks the same way the
+    // gateway legs do — skip tripped models instantly under direct: keys.
+    const routeKey = `direct:${modelId}`;
+    if (breaker.shouldSkip(routeKey)) {
+      directSkipped++;
+      console.log(`[litellm] circuit OPEN for ${routeKey} — skipping (fail-fast)`);
+      continue;
+    }
+    directAttemptedAny = true;
     try {
       // When reasoning is capped (not disabled), reserve that budget so the
       // content reply isn't starved by a small caller-supplied maxTokens.
@@ -313,16 +495,26 @@ async function chatTurnDirect({ systemPrompt, userMessage, messages, maxTokens =
       const text = resp.data && resp.data.choices && resp.data.choices[0] &&
         resp.data.choices[0].message && resp.data.choices[0].message.content;
       if (text && text.trim()) {
+        breaker.recordSuccess(routeKey);
         console.log(`[litellm] VM-direct failover succeeded via ${modelId}`);
+        const usage = normalizeUsage(resp.data && resp.data.usage);
+        const answeredBy = resp.data && typeof resp.data.model === 'string' ? resp.data.model : undefined;
         // toolsDropped (Oct 12, 2026 — #724 amendment): the direct path has
         // NO native tool channel. Callers must DETECT this and flag text
         // emulation explicitly instead of silently degrading.
-        return { text, toolCalls: [], ...(tools && tools.length ? { toolsDropped: true } : {}) };
+        return { text, toolCalls: [], route: routeKey, ...(usage ? { usage } : {}), ...(answeredBy ? { model: answeredBy } : {}), ...(tools && tools.length ? { toolsDropped: true } : {}), ...(cacheWiring ? { cache: { sessionId: cacheWiring.sessionId, prefixHash: cacheWiring.prefixHash, mode: cacheWiring.mode } } : {}) };
       }
+      breaker.recordEmpty(routeKey);
+      rotateDirectSessionAfterEmpty();
       errors.push(`${modelId}: empty response`);
     } catch (e) {
       errors.push(`${modelId}: ${e.message}`);
     }
+  }
+  if (!directAttemptedAny && directSkipped > 0) {
+    const err = new Error('litellm: circuit open for all VM-direct failover routes — failing fast, no OpenRouter calls made (empty-response streak cooldown)');
+    err.circuitOpen = true;
+    throw err;
   }
   throw new Error(`litellm: VM-direct failover failed [${errors.join('; ').slice(0, 200)}]`);
 }

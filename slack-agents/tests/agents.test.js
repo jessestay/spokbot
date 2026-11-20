@@ -140,7 +140,14 @@ describe('handleDelegation() matches correct patterns', () => {
     test(`${agentId} responds to its delegation pattern`, async () => {
       const mod = require(`../agents/${agentId}`);
       const result = await mod.handleDelegation(message);
-      expect(result).toBe(true);
+      // Agents return structured evidence objects: {completed, response, ...}
+      // Legacy boolean true is also accepted for backward compatibility.
+      if (typeof result === 'boolean') {
+        expect(result).toBe(true);
+      } else {
+        expect(result).toBeDefined();
+        expect(result.completed).toBe(true);
+      }
     });
   });
 });

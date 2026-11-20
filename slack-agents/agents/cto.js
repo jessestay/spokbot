@@ -11,7 +11,7 @@ const { AGENTS, CHANNELS } = require('../config');
 const state = require('../utils/state');
 const { generateReport, generateWithTools } = require('../utils/anthropic');
 const { resolveChannel: _resolveChannel } = require('../utils/channels');
-const { relay, stripDelegations } = require('../utils/delegation');
+const { relay, stripDelegations, delegationFailure } = require('../utils/delegation');
 
 const AGENT = AGENTS.cto;
 const AGENT_ID = AGENT.id; // 'cto'
@@ -112,14 +112,21 @@ async function handleDelegation(messageText, visitedAgents = new Set(), channelI
     from: fromAgent, request: request.slice(0, 200), timestamp: new Date().toISOString()
   });
 
-  const context = `Technical request from ${fromAgent}: "${request}"\nProvide a clear technical assessment: current state, recommended approach, estimated complexity (days/weeks), and any risks.`;
+  const context = `Technical request from ${fromAgent}: "${request}"\nExecute this request with your tools and return evidence: what you did, the artifacts produced (file paths, URLs, command output), and how you verified the result. Assess only what you cannot execute, and name the exact blocker for that part in one line.`;
   // TOOL EXECUTION (Oct 9, 2026): CTO now has tools — can check URLs, write files,
   // build artifacts. This replaces the pure-text "no tool execution" path.
-  const { response, toolResults, toolsUsed } = await generateWithTools({
+  const { response, toolResults, toolsUsed, ok, errorClass } = await generateWithTools({
     systemPrompt: AGENT.systemPrompt,
     context,
     maxTokens: 2000,
+    agentId: AGENT_ID,
   });
+    // CEO BUILD (Oct 22, 2026): honor the generateWithTools failure contract.
+  // A failed run (ok === false / null response) is a FAILED delegation —
+  // never a completed one with an empty body (audit F1).
+  if (ok === false || response == null) {
+    return delegationFailure({ errorClass, agentId: AGENT_ID, threadTs, channel: AGENT.primaryChannel });
+  }
   const subResults = await relay(response, AGENT_ID, visitedAgents, channelId);
 
   // POLLER IS SOLE POSTER (Oct 4, 2026 — architectural fix):

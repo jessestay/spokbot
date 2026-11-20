@@ -98,11 +98,70 @@ async function trackDelegation(fromAgentId, toAgentId, requestText) {
 const REVENUE_RE = /revenue|sales|client|sponsor|donation|customer|launch|monetiz|paid|invoice/i;
 
 function routeAgent(text) {
-  const t = String(text || '');
+  // CEO BUILD 6: the stamped MACF-CONTRACT block is metadata, not task
+  // content — its own text ("contract") keyword-routed every contracted
+  // task to the lawyer. Strip it before matching.
+  const t = String(text || '').replace(/<!--\s*MACF-CONTRACT\s*[\s\S]*?\s*MACF-CONTRACT\s*-->/g, ' ');
   for (const { pattern, agent } of TASK_ROUTING) {
     if (pattern.test(t)) return agent;
   }
   return 'execPM';
+}
+
+// ─── Ownership (CEO BUILD 6, Oct 22, 2026) ──────────────────────────────────
+// Vikunja assignees are the board's statement of who owns a task. Before
+// this build the engine ignored them: workTask re-derived an owner from
+// title keywords and the picker never looked at queues at all, so the
+// board's ownership had no effect on who got work (Oct 21: seven agents
+// produced nothing while assigned queues sat untouched). Resolution
+// order: (1) a recognized assignee (Vikunja username -> agent id);
+// (2) keyword routing, unchanged. jarvis-jr (the CEO account) is not a
+// worker assignee and falls through to keyword routing.
+const ASSIGNEE_AGENT = {
+  execpm: 'execPM', cmo: 'cmo', cco: 'cco', cfo: 'cfo', cro: 'cro',
+  cto: 'cto', cuxo: 'cuxo', lawyer: 'lawyer', jobcoach: 'jobcoach',
+  facebook: 'facebook',
+};
+
+function resolveOwner(task) {
+  const assignees = (task && task.assignees) || [];
+  for (const a of assignees) {
+    const id = ASSIGNEE_AGENT[String((a && a.username) || '').toLowerCase()];
+    if (id) return id;
+  }
+  return routeAgent(`${(task && task.title) || ''} ${(task && task.description) || ''}`);
+}
+
+// Batch diversity: order-preserving selection that takes one task per
+// owner first, then fills remaining slots in the original order — one
+// agent can no longer consume a whole batch while other owners' eligible
+// work waits. Diversity applies WITHIN a lane segment only (segmentOf
+// returns the segment key; segments are contiguous in the picker's
+// ordered list): promoting across lanes would let a fail-closed legacy
+// task jump contracted work, which the Build 3 batch contract forbids.
+function diversifyBatch(list, n, segmentOf) {
+  const items = Array.isArray(list) ? list : [];
+  if (items.length <= n) return items.slice();
+  const segOf = typeof segmentOf === 'function' ? segmentOf : () => 0;
+  const segments = [];
+  for (const t of items) {
+    const key = segOf(t);
+    const tail = segments[segments.length - 1];
+    if (tail && tail.key === key) tail.items.push(t);
+    else segments.push({ key, items: [t] });
+  }
+  const out = [];
+  for (const seg of segments) {
+    const seen = new Set();
+    const first = [];
+    const rest = [];
+    for (const t of seg.items) {
+      const o = resolveOwner(t);
+      if (!seen.has(o)) { seen.add(o); first.push(t); } else rest.push(t);
+    }
+    out.push(...first, ...rest);
+  }
+  return out.slice(0, n);
 }
 
 async function triageBoard() {
@@ -201,6 +260,9 @@ module.exports = {
   stripDelegationPrefix,
   isNoise,
   routeAgent,
+  resolveOwner,
+  diversifyBatch,
+  ASSIGNEE_AGENT,
   triageBoard,
   openTasksSummary,
 };

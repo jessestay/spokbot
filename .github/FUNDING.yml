@@ -1,0 +1,5 @@
+# Spokbot is free and open source (Apache-2.0). Sponsorship keeps the
+# project maintained, tested, and free for everyone.
+# Docs: https://docs.github.com/en/repositories/managing-your-repositorys-settings-and-features/customizing-your-repository/displaying-a-sponsor-button-in-your-repository
+github: [jessestay]
+custom: ["https://spokbot.org/support/"]

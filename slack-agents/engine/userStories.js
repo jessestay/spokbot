@@ -48,15 +48,68 @@ function loadConfig() {
   }
 }
 
+const LIST_FIELDS = ['acceptance_criteria', 'bdd_tests', 'tdd_tests'];
+
+/**
+ * Read-path repair (US-FW-004). The three list fields must be arrays of
+ * strings. A defective writer could store one as a stringified list
+ * ('["engine/tests/x.test.js"]'), which array-expecting consumers then
+ * misread inconsistently: .length counts characters, Array.isArray
+ * fails, .filter throws. On read, a string that parses as a JSON array
+ * of strings is parsed back to an array. A string that does not parse
+ * is left exactly as stored — repair never invents or discards data;
+ * the storyLint tool (US-FW-003) flags it as evidence.
+ */
+function normalizeStoryFields(story) {
+  if (!story || typeof story !== 'object') return story;
+  const out = { ...story };
+  for (const field of LIST_FIELDS) {
+    const v = out[field];
+    if (typeof v !== 'string') continue;
+    try {
+      const parsed = JSON.parse(v);
+      if (Array.isArray(parsed) && parsed.every(el => typeof el === 'string')) {
+        out[field] = parsed;
+      }
+    } catch { /* not a stringified JSON array — leave as stored */ }
+  }
+  return out;
+}
+
+/**
+ * Write-path guard (US-FW-004). Throws a TypeError naming the field if
+ * any list field is present and not an array of strings, so a
+ * stringified list can never be written in the first place.
+ */
+function assertArrayFields(obj, context = 'story') {
+  if (!obj || typeof obj !== 'object') return;
+  for (const field of LIST_FIELDS) {
+    const v = obj[field];
+    if (v === undefined) continue;
+    if (!Array.isArray(v) || !v.every(el => typeof el === 'string')) {
+      throw new TypeError(
+        `${context}: ${field} must be an array of strings, got ${typeof v === 'string' ? 'a string (stringified list?)' : typeof v}`,
+      );
+    }
+  }
+}
+
 function loadStories() {
   try {
-    return JSON.parse(fs.readFileSync(STORIES_PATH, 'utf8'));
+    const data = JSON.parse(fs.readFileSync(STORIES_PATH, 'utf8'));
+    if (Array.isArray(data.stories)) {
+      data.stories = data.stories.map(normalizeStoryFields);
+    }
+    return data;
   } catch {
     return { stories: [], nextId: 1 };
   }
 }
 
 function saveStories(data) {
+  for (const story of data.stories || []) {
+    assertArrayFields(story, `saveStories (${story.id || 'story'})`);
+  }
   fs.writeFileSync(STORIES_PATH, JSON.stringify(data, null, 2));
 }
 
@@ -64,6 +117,8 @@ function saveStories(data) {
  * Create a new user story with validation.
  */
 function createStory({ title, story_points, acceptance_criteria, bdd_tests, tdd_tests }) {
+  // Type guard first, before any file I/O: a rejected call writes nothing.
+  assertArrayFields({ acceptance_criteria, bdd_tests, tdd_tests }, 'createStory');
   const config = loadConfig();
   const usConfig = config.user_stories || {};
 
@@ -159,4 +214,4 @@ if (require.main === module) {
   }
 }
 
-module.exports = { createStory, checkDefinitionOfDone, getSprintCandidates, loadStories, saveStories };
+module.exports = { createStory, checkDefinitionOfDone, getSprintCandidates, loadStories, saveStories, normalizeStoryFields, assertArrayFields };

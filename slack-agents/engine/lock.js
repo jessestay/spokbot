@@ -19,10 +19,22 @@ function holderId() {
 }
 
 function parseHeartbeat(task) {
+  const raw = String((task && task.description) || '');
   try {
-    const data = JSON.parse(task.description || '');
+    const data = JSON.parse(raw);
     if (data && typeof data.heartbeat === 'string') return data;
-  } catch (_) { /* malformed → stale */ }
+  } catch (_) { /* fall through to prefix extraction */ }
+  // Robustness: if anything was ever appended after the heartbeat JSON
+  // (e.g. the contract stamp createTask used to add), parse the leading
+  // JSON object instead of treating a live lock as stale.
+  const start = raw.indexOf('{');
+  const end = raw.indexOf('}\n');
+  if (start >= 0 && end > start) {
+    try {
+      const data = JSON.parse(raw.slice(start, end + 1));
+      if (data && typeof data.heartbeat === 'string') return data;
+    } catch (_) { /* malformed → stale */ }
+  }
   return null;
 }
 

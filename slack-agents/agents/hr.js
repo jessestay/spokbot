@@ -11,7 +11,7 @@ const { AGENTS } = require('../config');
 const state = require('../utils/state');
 const { generateReport, generateWithTools } = require('../utils/anthropic');
 const { resolveChannel: _resolveChannel } = require('../utils/channels');
-const { relay, stripDelegations } = require('../utils/delegation');
+const { relay, stripDelegations, delegationFailure } = require('../utils/delegation');
 
 const AGENT = AGENTS.hr;
 const AGENT_ID = AGENT.id; // 'hr'
@@ -117,11 +117,18 @@ Respond as the Head of HR and skill creator. Apply the meta-skill rules: propose
 
   // TOOL EXECUTION (Oct 9, 2026): HR now has tools — can check URLs, read/write
   // files when building or reviewing skills.
-  const { response, toolResults, toolsUsed } = await generateWithTools({
+  const { response, toolResults, toolsUsed, ok, errorClass } = await generateWithTools({
     systemPrompt: AGENT.systemPrompt,
     context,
     maxTokens: 2000,
+    agentId: AGENT_ID,
   });
+    // CEO BUILD (Oct 22, 2026): honor the generateWithTools failure contract.
+  // A failed run (ok === false / null response) is a FAILED delegation —
+  // never a completed one with an empty body (audit F1).
+  if (ok === false || response == null) {
+    return delegationFailure({ errorClass, agentId: AGENT_ID, threadTs, channel: AGENT.primaryChannel });
+  }
   const subResults = await relay(response, AGENT_ID, visitedAgents, channelId);
 
   // POLLER IS SOLE POSTER (Oct 4, 2026 — architectural fix):

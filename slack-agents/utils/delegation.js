@@ -25,9 +25,12 @@ function init(agentModules, delegationTargets) {
  * @param {string} fromAgentId   - The agent ID that produced this response
  * @param {Set}    visitedAgents - Agents already in this delegation chain (loop guard)
  * @param {string} channelId     - Originating Slack channel ID (propagated for routing)
+ * @returns {Array} Array of {agentId, result} for each sub-delegation executed.
+ *   Callers should include these in their return value so the poller (sole poster)
+ *   can validate and post all responses. Sub-agents must NOT post directly.
  */
 async function relay(responseText, fromAgentId, visitedAgents = new Set(), channelId = null) {
-  if (!responseText) return;
+  if (!responseText) return [];
 
   // Build the new visited set for this level
   const newVisited = new Set([...visitedAgents, fromAgentId]);
@@ -36,6 +39,7 @@ async function relay(responseText, fromAgentId, visitedAgents = new Set(), chann
   // Captures: group 1 = target name, group 2 = message body up to next [ or end
   const delegRegex = /\[from:\s*[^\]→]+→\s*([^\]]+)\]\s*([\s\S]*?)(?=\[from:|$)/gi;
   const dispatched = new Set(); // prevent duplicate A→B pairs in same response
+  const subResults = []; // Collect sub-agent results for the poller to post
   let match;
 
   while ((match = delegRegex.exec(responseText)) !== null) {
@@ -76,15 +80,24 @@ async function relay(responseText, fromAgentId, visitedAgents = new Set(), chann
 
     console.log(`[delegation] Chain [${[...newVisited].join(' → ')}] → ${toAgentId}`);
 
-    await _agentModules[toAgentId]
-      .handleDelegation(fullMsg, new Set(newVisited), channelId)
-      .catch(err => console.error(`[delegation] Error invoking ${toAgentId}:`, err));
+    try {
+      const result = await _agentModules[toAgentId]
+        .handleDelegation(fullMsg, new Set(newVisited), channelId);
+      // Capture the sub-agent's result so the poller (sole poster) can validate and post it.
+      // Sub-agents must NOT post directly — the poller is the only poster.
+      subResults.push({ agentId: toAgentId, result });
+    } catch (err) {
+      console.error(`[delegation] Error invoking ${toAgentId}:`, err);
+      subResults.push({ agentId: toAgentId, result: null, error: err.message });
+    }
 
     // Track the delegation as a Vikunja task owned by the receiving agent.
     // Silent no-op when Vikunja isn't configured; never breaks the chain.
     tasks.trackDelegation(fromAgentId, toAgentId, msgBody).catch(err =>
       console.error('[delegation] Task tracking failed:', err.message));
   }
+
+  return subResults;
 }
 
 /**
@@ -95,12 +108,91 @@ async function relay(responseText, fromAgentId, visitedAgents = new Set(), chann
  */
 function stripDelegations(text) {
   if (!text) return '';
-  return text
+  let clean = text
     .split('\n')
     .filter(line => !/^\s*\[from:\s*[^→\]]+→[^\]]+\]/i.test(line.trim()))
     .join('\n')
     .replace(/\n{3,}/g, '\n\n')
     .trim();
+  // FIX (Oct 2, 2026): Also strip tool-call artifacts here so all existing
+  // callers get the sanitization automatically.
+  clean = clean.replace(/<\|tool_call_start\|>.*?<\|tool_call_end\|>/gs, '');
+  clean = clean.replace(/<\|.*?\|>/g, '');
+  return clean.trim();
 }
 
-module.exports = { init, relay, stripDelegations };
+/**
+ * Sanitize LLM output before posting to Slack. Removes tool-call artifacts,
+ * system markers, and other non-user-facing content.
+ * FIX (Oct 2, 2026): Prevents raw <|tool_call_start|> etc. from leaking into channels.
+ * @param {string} text
+ * @returns {string}
+ */
+function sanitizeForSlack(text) {
+  if (!text) return '';
+  let clean = stripDelegations(text);
+  // Remove tool-call artifacts
+  clean = clean.replace(/<\|tool_call_start\|>.*?<\|tool_call_end\|>/gs, '');
+  clean = clean.replace(/<\|.*?\|>/g, '');
+  // Remove common LLM artifacts
+  clean = clean.replace(/^\s*(Assistant|AI|Bot):\s*/im, '');
+  return clean.trim();
+}
+
+/**
+ * Detect garbled/incoherent LLM output (Oct 9, 2026).
+ * Returns true if the text appears to be a fragment, hallucination, or corrupted.
+ * Signs of garbled output:
+ * - Starts with lowercase conjunctions/fragments ("or similar.", "but the user...")
+ * - Contains meta-commentary about responding ("Let me analyze this carefully. The user is asking me to respond as...")
+ * - Very short with no substantive content
+ * - Contains "as an AI" or similar self-references in wrong context
+ */
+function isGarbledOutput(text) {
+  if (!text || text.trim().length < 20) return true;
+
+  const t = text.trim();
+
+  // Fragment starts: begins with lowercase "or", "but", "and", "so" followed by fragment
+  if (/^(or|but|and|so|because)\s+[a-z]/i.test(t) && t.length < 100) return true;
+
+  // Meta-commentary: LLM talking about itself responding
+  if (/let me analyze this carefully\. the user is asking me to respond as/i.test(t)) return true;
+  if (/i (should|will) (probably|maybe) just answer/i.test(t)) return true;
+
+  // Self-reference in delegation context (agents shouldn't talk about being AI)
+  if (/as an ai (language )?model/i.test(t)) return true;
+
+  // Truncated sentence ending mid-thought with no punctuation
+  if (/[^.!?:;]$/.test(t) && t.split(' ').length < 10) return true;
+
+  // Chain-of-thought leaks: LLM narrating its reasoning process
+  if (/here'?s (a |my )?thinking process/i.test(t)) return true;
+  if (/^\d+\.\s+\*\*analyze/i.test(t)) return true;
+  if (/let me think (step by step|through this)/i.test(t)) return true;
+  if (/my (reasoning|thought) process/i.test(t)) return true;
+
+  return false;
+}
+
+// CEO BUILD (Oct 22, 2026): the shared delegation failure contract.
+// generateWithTools reports failure as { ok:false, errorClass, response:null }
+// (utils/anthropic.js). Agents MUST surface that as a failed delegation —
+// for months every handler discarded it and returned completed:true with an
+// empty body, which the finalize path then stamped "completed" (audit F1).
+function delegationFailure({ errorClass, agentId, threadTs = null, channel = null } = {}) {
+  return {
+    completed: false,
+    ok: false,
+    errorClass: errorClass || 'no_result',
+    response: null,
+    threadTs,
+    channel,
+    subResults: [],
+    evidence: `Run failed (${errorClass || 'no_result'}): no deliverable produced`,
+    agentId,
+    timestamp: new Date().toISOString(),
+  };
+}
+
+module.exports = { init, relay, stripDelegations, sanitizeForSlack, isGarbledOutput, delegationFailure };

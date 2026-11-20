@@ -1,0 +1,17 @@
+[Unit]
+Description=MACF LinkedIn MCP server (vahabcore, MACF-patched per-connection transport)
+After=network.target
+
+[Service]
+Type=simple
+User=ubuntu
+WorkingDirectory=/home/ubuntu/workspace/macf/hands/servers/linkedin
+Environment=HOME=/home/ubuntu/workspace/macf/engine-home
+Environment=PORT=3421
+EnvironmentFile=/home/ubuntu/workspace/macf/slack-agents/.env
+ExecStart=/usr/bin/node /home/ubuntu/workspace/macf/hands/servers/linkedin/server.js
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

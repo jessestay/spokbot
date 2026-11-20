@@ -6,8 +6,8 @@ This document explains how the BVital project is configured for Cursor cloud age
 
 ```
 BVital/
-├── .cursor/                          # Multi-agent Framework (separate git repo)
-│   └── [Multi-agent Framework files]
+├── .cursor/                          # Spokbot framework (separate git repo)
+│   └── [Spokbot framework files]
 ├── .gitignore                        # Excludes .cursor/ from main repo
 ├── bvital.code-workspace            # VS Code/Cursor workspace config
 └── README.md                        # Project documentation
@@ -22,11 +22,11 @@ BVital/
 - **Contains**: Project-specific files, workspace configuration
 - **Excludes**: `.cursor/` directory (via `.gitignore`)
 
-### 2. Framework Repository (Multi-agent Communications Framework)
+### 2. Framework Repository (Spokbot)
 - **Location**: `.cursor/` directory
-- **Remote**: `https://github.com/jessestay/MultiAgentCommsFramework`
+- **Remote**: `https://github.com/jessestay/spokbot`
 - **Branch**: `main`
-- **Contains**: Shared multi-agent framework rules, configurations, and tools
+- **Contains**: Shared Spokbot framework rules, configurations, and tools
 - **Purpose**: Shared across multiple projects
 
 ## Cursor Cloud Agent Compatibility
@@ -34,7 +34,7 @@ BVital/
 This setup is fully compatible with Cursor cloud agents because:
 
 1. **Repository Access**: Both repositories are on GitHub and accessible to cloud agents
-2. **Framework Access**: Cloud agents can access the Multi-agent Framework rules in `.cursor/rules/`
+2. **Framework Access**: Cloud agents can access the Spokbot rules in `.cursor/rules/`
 3. **Project Isolation**: Main project files remain separate from the framework
 4. **Independent Versioning**: Each repository maintains its own version history
 
@@ -56,7 +56,7 @@ git push origin main
 # Navigate to framework directory
 cd /home/stay/GithubRepos/BVital/.cursor
 
-# Git operations here affect the Multi-agent Framework repository
+# Git operations here affect the Spokbot repository
 git add .
 git commit -m "Framework update"
 git push origin main
@@ -69,9 +69,9 @@ When Cursor cloud agents access this repository:
 2. The `.cursor/` directory (with its own `.git/`) is present locally
 3. Agents can access both:
    - Project-specific code and files
-   - Multi-agent Framework rules and configurations from `.cursor/rules/`
+   - Spokbot rules and configurations from `.cursor/rules/`
 
-This enables cloud agents to leverage the full Multi-agent Communications Framework while working on project-specific tasks.
+This enables cloud agents to leverage the full Spokbot framework while working on project-specific tasks.
 
 
 

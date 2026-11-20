@@ -88,6 +88,20 @@ async function listProjects(agentId = 'execPM') {
 async function createTask(agentId, projectId, { title, description = '', priority = PRIORITY.NORMAL, dueDate = null, assignees = null } = {}) {
   if (!title) throw new Error('createTask requires a title');
 
+  // CONTRACT STAMPING (M3, Vikunja #771): every task born through this
+  // path carries a contract from birth. A creator-stamped contract is
+  // kept untouched; otherwise the floor contract is stamped (done
+  // requires at least one successful tool execution in the ledger).
+  // Lazy require: engine/taskContract has no deps, this just keeps the
+  // utils layer load-order simple.
+  // EXCEPTION: the ENGINE LOCK task's description is a machine protocol
+  // (pure-JSON heartbeat, engine/lock.js), not work prose. Stamping a
+  // contract onto it corrupts the JSON every lock reader parses — the lock
+  // is infrastructure and is never worked as a task, so it needs no contract.
+  if (!/engine lock/i.test(title)) {
+    description = require('../engine/taskContract').ensureContract(description);
+  }
+
   // ROOT-CAUSE FIX: Tasks MUST have an owner. Unassigned tasks are a
   // systemic failure — they sit stale because no one owns them.
   // If no assignee specified, default to the creating agent.
@@ -183,6 +197,19 @@ async function unassignTask(agentId, taskId, userId) {
   return request(agentId, `/tasks/${taskId}/assignees/${userId}`, { method: 'DELETE' });
 }
 
+// ─── Task relations (subtasks) ─────────────────────────────────────────────
+// Vikunja models a subtask as a relation on the PARENT task:
+// PUT /tasks/{id}/relations { other_task_id, relation_kind: 'subtask' }.
+// (US-FW-031 AC1: the PM writes breakdown stories as subtasks of the
+// requirement task — engine/pm-breakdown.js writeStoriesToVikunja.)
+async function addTaskRelation(agentId, taskId, otherTaskId, relationKind = 'subtask') {
+  if (!taskId || !otherTaskId) throw new Error('addTaskRelation requires taskId and otherTaskId');
+  return request(agentId, `/tasks/${taskId}/relations`, {
+    method: 'PUT',
+    body: { other_task_id: otherTaskId, relation_kind: relationKind },
+  });
+}
+
 // ─── Comments ────────────────────────────────────────────────────────────────
 async function addComment(agentId, taskId, comment) {
   return request(agentId, `/tasks/${taskId}/comments`, { method: 'PUT', body: { comment } });
@@ -204,5 +231,6 @@ module.exports = {
   listTasks,
   assignTask,
   unassignTask,
+  addTaskRelation,
   addComment,
 };

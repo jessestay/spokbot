@@ -69,6 +69,29 @@ const CHECKERS = {
     return { satisfied: true, observed };
   },
 
+  // Ground truth: the filesystem + JSON.parse (#925, Nov 2, 2026). A
+  // deliverable that is a JSON envelope (e.g. the weekly content batch)
+  // must not merely EXIST — its named array field must carry at least
+  // `min` entries. Synchronous on purpose: the directive finalize gate
+  // (directivePostconditions.verifyPostconditions) calls checkers
+  // synchronously. Fails closed on a missing file, unparseable JSON, or
+  // a non-array field.
+  json_array_min(pc, ctx) {
+    const resolved = path.join(sandboxDir(), pc.path || '');
+    let raw = null;
+    try { raw = fs.readFileSync(resolved, 'utf8'); } catch { /* missing */ }
+    if (raw === null) return { satisfied: false, observed: { exists: false, parseOk: false, count: 0 } };
+    let parsed = null;
+    try { parsed = JSON.parse(raw); } catch {
+      return { satisfied: false, observed: { exists: true, parseOk: false, count: 0 } };
+    }
+    const field = pc.field || 'drafts';
+    const arr = parsed && Array.isArray(parsed[field]) ? parsed[field] : null;
+    const count = arr ? arr.length : 0;
+    const min = pc.min || 1;
+    return { satisfied: count >= min, observed: { exists: true, parseOk: true, field, count, min } };
+  },
+
   // Ground truth: a live HTTP check through the same curl path as urlCheck.
   // Async (execFile, not execFileSync): a sync call would freeze the engine
   // event loop for up to 10s per check — and deadlock outright when the
@@ -99,11 +122,12 @@ const CHECKERS = {
     return { satisfied: expect.includes(code), observed: code, expected: expect };
   },
 
-  // Ground truth: the receipts ledger.
+  // Ground truth: the receipts ledger. pc.tool '*' matches any tool
+  // (the floor contract's "at least one real execution" bar, M3).
   receipt_count(pc, ctx) {
     const receipts = require('./receipts');
     const count = receipts.receiptsForTask(ctx.taskId)
-      .filter(r => r.tool === pc.tool && (!pc.status || r.status === pc.status)).length;
+      .filter(r => (pc.tool === '*' || r.tool === pc.tool) && (!pc.status || r.status === pc.status)).length;
     return { satisfied: count >= (pc.min || 1), observed: count, expected: pc.min || 1 };
   },
 
@@ -173,15 +197,31 @@ async function verifyTask({ taskId, contract } = {}) {
  * The VERIFYING → DONE transition — and the ONLY place in the codebase
  * that calls vikunja.completeTask for contracted work. Verifies first;
  * completes only when every check passes.
+ *
+ * LOOP GUARD (M3, Vikunja #771): a LOOP task (title "LOOP: ...") is
+ * recurring — a verified run completes the RUN, never the task. The
+ * pre-#724 prose path had this guard; the #724 rewrite dropped it, so
+ * verified loop tasks were being marked done and never ran again. For
+ * a LOOP task this returns completed:true with loop:true and does NOT
+ * call vikunja.completeTask; the caller returns the task to OPEN.
  */
-async function completeVerifiedTask({ taskId, contract, agentId = null } = {}) {
+async function completeVerifiedTask({ taskId, contract, agentId = null, taskTitle = '' } = {}) {
   const verdict = await verifyTask({ taskId, contract });
   if (!verdict.satisfied) {
     return { completed: false, results: verdict.results, failures: verdict.failures };
   }
+  // Auditable completion (M3, US-9): every verified completion carries
+  // a verification ID derived from the verdict itself, so the
+  // completion message and the task record cite the proof, not a claim.
+  const verificationId = `ver_${taskId}_${sha256Hex(Buffer.from(
+    JSON.stringify(verdict.results) + '|' + new Date().toISOString()
+  )).slice(0, 10)}`;
+  if (/^LOOP:/i.test(String(taskTitle || ''))) {
+    return { completed: true, loop: true, verificationId, results: verdict.results, failures: [] };
+  }
   const vikunja = require('../utils/vikunja');
   await vikunja.completeTask('execPM', taskId);
-  return { completed: true, results: verdict.results, failures: [] };
+  return { completed: true, verificationId, results: verdict.results, failures: [] };
 }
 
 /**

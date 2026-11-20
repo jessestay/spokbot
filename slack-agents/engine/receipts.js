@@ -20,14 +20,12 @@ const crypto = require('crypto');
 
 const ENGINE_DIR = __dirname;
 
-// Same resolution as utils/state.js: env overrides win; the macf live-state
-// dir is canonical for every user when it exists.
+// Same resolution as utils/state.js — the single shared resolver in
+// utils/instancePaths.js (US-FW-002): legacy env overrides win, then
+// SPOKBOT_STATE_DIR, then the checkout's own .state for every user.
+const { resolvedStateDir } = require('../utils/instancePaths');
 function stateDir() {
-  if (process.env.RAILWAY_VOLUME_MOUNT_PATH) return process.env.RAILWAY_VOLUME_MOUNT_PATH;
-  if (process.env.MACF_STATE_DIR) return process.env.MACF_STATE_DIR;
-  const canonical = '/home/macf/workspace/macf/slack-agents/.state';
-  try { if (fs.existsSync(canonical)) return canonical; } catch { /* fall through */ }
-  return path.join(process.env.HOME || '/home/hatch', 'workspace', 'macf', 'slack-agents', '.state');
+  return resolvedStateDir();
 }
 
 function receiptsFile() {

@@ -111,7 +111,11 @@ function isParked(taskId) {
 // Tasks matching this are Jesse-gated: the team may not execute them, but
 // Jesse gets an immediate ping (Jesse's rule: things that absolutely need him
 // are immediate pings). Pings are batched into ONE DM per cycle.
-const JESSE_GATED_RE = /jesse action|needs jesse|jesse-only|jesse approval/i;
+// M3 (Vikunja #771): the predicate lives in utils/jesseGate.js and is an
+// enumerated allowlist (gate marker leading the title, or an explicit
+// [Jesse-gated] tag) — the old regex tested title + description for any
+// approval mention anywhere, which deadlocked workflow tasks like #82
+// (drafts → Jesse approval → sends) and #122 forever.
 // Dormant by Jesse's own standing orders — never ping, never work.
 // (Matches HOLD-001 / "on hold" / "parked" as a status, not incidental words
 // like "RAM held".)
@@ -135,8 +139,7 @@ function isDormant(task) {
 
 function isJesseGated(task) {
   if (isDormant(task)) return false;
-  const haystack = `${task.title || ''} ${task.description || ''}`;
-  return JESSE_GATED_RE.test(haystack);
+  return require('../utils/jesseGate').isJesseGated(task);
 }
 
 function isTimeCritical(task) {
@@ -204,10 +207,32 @@ async function pingJesse(items) {
   else log('WARN: could not DM Jesse');
 }
 
+// ─── Execution timeout (M5, Vikunja #771) ────────────────────────────────────
+// A hung model/tool execution inside workTask used to wedge the whole
+// cycle: cycleInFlight stayed true and every later cycle skipped. The
+// per-attempt LLM timeouts (60s) do not bound the full execution (tier
+// fallbacks + tool rounds + executor steps), so the execute phase gets
+// its own outer bound. On expiry the wrapper rejects with an
+// execution_timeout error and workTask's existing failure path records
+// the attempt and releases the cycle. Override with
+// MACF_EXECUTION_TIMEOUT_MS.
+const EXECUTION_TIMEOUT_MS = Number(process.env.MACF_EXECUTION_TIMEOUT_MS) || 10 * 60 * 1000;
+
+function withExecutionTimeout(promise, ms, label) {
+  const bound = Number(ms) > 0 ? Number(ms) : EXECUTION_TIMEOUT_MS;
+  let timer = null;
+  const timeout = new Promise((_, reject) => {
+    timer = setTimeout(() => reject(new Error(`execution_timeout: ${label || 'execution'} exceeded ${bound}ms`)), bound);
+    if (timer.unref) timer.unref();
+  });
+  return Promise.race([promise, timeout]).finally(() => { if (timer) clearTimeout(timer); });
+}
+
 // ─── Work one actionable task ────────────────────────────────────────────────
 async function workTask(task) {
-  const haystack = `${task.title || ''} ${task.description || ''}`;
-  const ownerId = tasks.routeAgent(haystack);
+  // CEO BUILD 6: the task's Vikunja assignee owns it; keyword routing is
+  // only the fallback for unassigned or CEO-held tasks.
+  const ownerId = tasks.resolveOwner(task);
   const owner = AGENTS[ownerId] || AGENTS.execPM;
 
   // BACKOFF (Oct 5, 2026): If a LOOP task has failed with the same tool error
@@ -304,7 +329,7 @@ ${completionProtocol}
     let result;
     const executors = require('./executors');
     if (contract.executor && executors.has(contract.executor)) {
-      result = await executors.dispatch(contract.executor, {
+      result = await withExecutionTimeout(executors.dispatch(contract.executor, {
         task, contract, agentId: ownerId,
         postMessage: async ({ channel, text }) => {
           const cid = await resolveChannelId(channel).catch(() => null);
@@ -312,13 +337,13 @@ ${completionProtocol}
           await postAs(ownerId, cid, text);
           return { ts: new Date().toISOString() };
         },
-      });
+      }), EXECUTION_TIMEOUT_MS, `task #${task.id} executor ${contract.executor}`);
       result.toolResults = result.toolResults || [];
     } else {
-      result = await generateWithTools({
+      result = await withExecutionTimeout(generateWithTools({
         systemPrompt: owner.systemPrompt, context, maxTokens: 2000, agentId: ownerId, taskId: task.id,
         outputSchema: getSchema(contract.deliverable.schema), schemaName: contract.deliverable.schema,
-      });
+      }), EXECUTION_TIMEOUT_MS, `task #${task.id} generateWithTools`);
     }
     output = result.response;
     toolResults = result.toolResults || [];
@@ -358,6 +383,28 @@ ${completionProtocol}
     // FIX (Oct 12, 2026 — starvation): record the attempt even on failure,
     // or this task is re-picked every cycle forever.
     recordAttempt(task.id, false);
+    return;
+  }
+  if (generationFailure === 'round_exhausted_with_work') {
+    // ROUND-EXHAUSTION-WITH-WORK (Oct 21, 2026): the run spent its tool
+    // rounds doing verified work and only the final summary turn never
+    // landed (task #105, 16:44Z — seven healthy tool turns, then the old
+    // code threw the empty-streak error and this task took a failure
+    // strike for real work). generateWithTools now classes that shape
+    // distinctly, so it is recorded distinctly here: NO failure strike
+    // and NO lifecycle attempt consumed. lastWorked still advances (the
+    // same write recordAttempt makes) so the picker backs off normally
+    // instead of re-picking the task every cycle, prior strikes are left
+    // untouched, and the miss feeds forward as structured data so the
+    // next attempt budgets its rounds to land the deliverable sooner.
+    // The work itself is not lost: the receipts are in the ledger and
+    // the run's checkpoint holds the tool results.
+    const okReceipts = toolResults.filter(t => t && t.result && t.result.ok === true).length;
+    log(`task #${task.id}: round_exhausted_with_work — ${okReceipts} verified tool receipts this run, final summary turn never landed; NO failure strike recorded; retry after cooldown`);
+    if (contract) {
+      saveLifecycle({ state: 'WORKING', lastVerification: [{ type: 'round_exhausted_with_work', satisfied: false, observed: `${okReceipts} verified tool receipts banked; rounds exhausted before the deliverable was produced — budget rounds and emit the deliverable JSON earlier` }] });
+    }
+    state.set(ENGINE_ID, `lastWorked.${task.id}`, new Date().toISOString());
     return;
   }
   if (generationFailure) {
@@ -402,14 +449,23 @@ ${completionProtocol}
   // parsing, and the sanitizers below do not exist on this path.
   if (contract) {
     saveLifecycle({ state: 'VERIFYING' });
-    const outcome = await completion.completeVerifiedTask({ taskId: task.id, contract, agentId: ownerId });
+    const outcome = await completion.completeVerifiedTask({ taskId: task.id, contract, agentId: ownerId, taskTitle: task.title });
     if (outcome.completed) {
-      saveLifecycle({ state: 'DONE', completedAt: new Date().toISOString(), lastVerification: null });
-      log(`task #${task.id} completed (verified: ${outcome.results.map(r => r.type).join(', ')})`);
+      // LOOP GUARD (M3): a verified LOOP run returns the task to OPEN —
+      // the deliverable counts, the task stays alive for its next run.
+      if (outcome.loop) {
+        saveLifecycle({ state: 'OPEN', attempts: 0, lastRunAt: new Date().toISOString(), lastVerification: null });
+        log(`task #${task.id} loop run completed (verified: ${outcome.results.map(r => r.type).join(', ')}) — task stays OPEN`);
+      } else {
+        saveLifecycle({ state: 'DONE', completedAt: new Date().toISOString(), lastVerification: null });
+        log(`task #${task.id} completed (verified: ${outcome.results.map(r => r.type).join(', ')})`);
+      }
       const channelId = await resolveChannelId(owner.primaryChannel).catch(() => null);
       if (channelId && output) {
         await postAs(ownerId, channelId,
-          `[work engine → ${owner.slackName}] Task #${task.id}: ${task.title}\n\n${output}`
+          `[work engine → ${owner.slackName}] Task #${task.id}: ${task.title}\n\n${output}\n\n` +
+          `✓ Verified by the completion verifier (${outcome.verificationId || 'ver'}): ` +
+          `${outcome.results.map(r => `${r.type}=pass`).join(', ')}`
         ).catch(err => log('post failed:', err.message));
         state.set(ENGINE_ID, `lastDemo.${ownerId}`, new Date().toISOString());
         state.set(ENGINE_ID, `lastDemoTask.${ownerId}`, task.id);
@@ -417,7 +473,10 @@ ${completionProtocol}
       await vikunja.addComment('execPM', task.id,
         `Work engine cycle (${new Date().toISOString()}):\n` +
         `Owner: ${owner.slackName}. Deliverable VERIFIED against contract postconditions ` +
-        `(${outcome.results.map(r => `${r.type}=pass`).join(', ')}). Marked done by the completion verifier.`
+        `(${outcome.results.map(r => `${r.type}=pass`).join(', ')}). Verification ID: ${outcome.verificationId || 'n/a'}. ` +
+        (outcome.loop
+          ? 'LOOP run verified — task remains OPEN for its next scheduled run (not marked done).'
+          : 'Marked done by the completion verifier.')
       ).catch(err => log(`comment failed on #${task.id}:`, err.message));
       updateAgentHealth(ownerId, true);
       recordAttempt(task.id, true);
@@ -595,10 +654,37 @@ async function runCycle() {
   try {
     rawLists = [];
     for (const pid of PROJECT_IDS) {
-      const r = await vikunja.listTasks('execPM', pid, {
-        filter: 'done = false', sortBy: 'priority', orderBy: 'desc', perPage: 50,
-      });
-      rawLists.push(Array.isArray(r) ? r : (r && r.tasks) || []);
+      // BUILD 3 (Oct 22, 2026 — CEO, F4): paginate the board scan. The old
+      // single page of 50 per project made only ~64 of ~600 open tasks
+      // visible to the picker — the rest could never be worked at all.
+      // BUILD 3b (same day): Vikunja caps per_page at 50 server-side
+      // (verified live: project 2 reports 13 total pages at per_page=100),
+      // so a short-page test against the REQUESTED size breaks after page
+      // 1. Learn the server's effective page size from page 1 instead,
+      // keep fetching while pages come back full, dedupe by task id
+      // (guards an API that ignores the page parameter), cap 25 pages.
+      const projectTasks = [];
+      const seenIds = new Set();
+      let serverPageSize = null;
+      for (let page = 1; page <= 25; page++) {
+        const r = await vikunja.listTasks('execPM', pid, {
+          filter: 'done = false', sortBy: 'priority', orderBy: 'desc', perPage: 100, page,
+        });
+        const items = Array.isArray(r) ? r : (r && r.tasks) || [];
+        if (serverPageSize === null) serverPageSize = items.length;
+        let fresh = 0;
+        for (const t of items) {
+          if (t && t.id != null) {
+            if (seenIds.has(t.id)) continue;
+            seenIds.add(t.id);
+          }
+          projectTasks.push(t);
+          fresh++;
+        }
+        if (!items.length || fresh === 0) break;
+        if (items.length < serverPageSize) break; // partial page = last page
+      }
+      rawLists.push(projectTasks);
     }
   } catch (err) {
     log('could not list tasks:', err.message);
@@ -633,22 +719,38 @@ async function runCycle() {
     return;
   }
 
-  // 2. Work the top actionable task (dormant and Jesse-gated excluded).
+  // 2. Work the top actionable tasks (dormant and Jesse-gated excluded).
   // PRIORITIZATION (Oct 5, 2026): Sort stale-first. The old code used
   // .find() which grabbed the first unworked task in Vikunja's return order —
   // tasks at the end of the list (#85, #87) were starved indefinitely.
   // Now: oldest-updated first, so stale tasks get priority.
+  // BUILD 3 (Oct 22, 2026 — CEO, F4): priority bands first, stale-first
+  // INSIDE a band. Pure stale-first meant raw priority barely mattered —
+  // a priority-5 task waited behind every older priority-0 task. Banding
+  // keeps the anti-starvation property (cooldown rotation + stalest-first
+  // within the band) while priority finally orders the board.
   const actionable = open.filter(t => !isJesseGated(t) && !isDormant(t));
   actionable.sort((a, b) => {
+    const pa = a.priority || 0;
+    const pb = b.priority || 0;
+    if (pb !== pa) return pb - pa; // higher priority first
     // Vikunja API uses 'updated', not 'updated_at'
     const aUpdated = new Date(a.updated || a.updated_at || 0).getTime();
     const bUpdated = new Date(b.updated || b.updated_at || 0).getTime();
-    return aUpdated - bUpdated; // Oldest first
+    return aUpdated - bUpdated; // Oldest first within the band
   });
   const isEligible = (t) => {
     // FIX (Oct 12, 2026 — starvation): a task that failed 3x in 4h is parked;
     // without this, one poisoned task blocks the whole backlog forever.
     if (isParked(t.id)) return false;
+    // FIX (Oct 21, 2026 — burn-down stall): a task whose persisted lifecycle
+    // is DONE or BLOCKED can never be worked again (workTask short-circuits
+    // it), but eligibility never consulted the lifecycle — task #717 sat
+    // BLOCKED with an Oct 18 lastWorked, stayed eligible forever, and as
+    // the stalest contracted task won the contracted lane every cycle,
+    // burning the cycle's only work slot on a no-op dispatch for 85+ min.
+    const lc = state.get(ENGINE_ID, 'taskLifecycle.' + t.id);
+    if (lc && (lc.state === 'DONE' || lc.state === 'BLOCKED')) return false;
     const last = state.get(ENGINE_ID, `lastWorked.${t.id}`);
     if (!last) return true;
     // High-priority work gets revisited sooner.
@@ -664,12 +766,73 @@ async function runCycle() {
   // still sorted ahead). Prefer the stalest eligible CONTRACTED task; fall
   // back to the stalest eligible task overall so fail-closed pressure and
   // attempt backoff on the legacy backlog are preserved.
-  const candidate = actionable.find(t => REVENUE_FOCUS.has(t.id) && isEligible(t))
-    || actionable.find(t => isEligible(t) && !!parseContract(t.description))
-    || actionable.find(t => isEligible(t));
+  // BUILD 3 (Oct 22, 2026 — CEO, F4): build the full ordered candidate list
+  // ONCE (lanes in order: revenue-focus, then contracted, then any eligible;
+  // actionable is already sorted priority-band then stalest-first, and lane
+  // membership preserves that order). The pre-fix picker worked exactly ONE
+  // candidate per cycle and returned — with a 30-minute tick that capped
+  // the board at ~33-48 task-touches/day against ~589 open tasks.
+  const ordered = [];
+  {
+    const picked = new Set();
+    const takeLane = (pred) => {
+      for (const t of actionable) {
+        if (picked.has(t.id) || !pred(t) || !isEligible(t)) continue;
+        picked.add(t.id);
+        ordered.push(t);
+      }
+    };
+    takeLane(t => REVENUE_FOCUS.has(t.id));
+    takeLane(t => !!parseContract(t.description));
+    takeLane(() => true);
+  }
+  // CEO BUILD 6: per-owner eligible queue depths, logged every cycle so
+  // imbalance is visible the day it forms, not in a post-mortem.
+  {
+    const depths = {};
+    for (const t of ordered) { const o = tasks.resolveOwner(t); depths[o] = (depths[o] || 0) + 1; }
+    const parts = Object.entries(depths).sort((a, b) => b[1] - a[1]).map(([k, v]) => `${k}=${v}`).join(' ');
+    if (parts) log(`queues (eligible): ${parts}`);
+  }
+  // Batching applies only on the tracked-workflow path: the dispatcher
+  // awaits each run's output (taskWorkflow.createTaskDispatcher), so
+  // concurrent dispatches still finish inside this cycle and the next
+  // cycle can never double-dispatch a task this batch is working. The
+  // inline fallback stays at one task per cycle — in-process executions
+  // share this process and remain serialized, exactly the pre-fix behavior.
+  const BATCH = Math.max(1, parseInt(process.env.WORK_ENGINE_BATCH || '4', 10) || 4);
+  // CEO BUILD 6: the dispatcher batch is owner-diverse WITHIN each lane
+  // segment — one task per owner first, then fill in lane order (see
+  // tasks.diversifyBatch). Lanes stay sacred: revenue, then contracted,
+  // then any eligible.
+  const laneSegment = (t) => (REVENUE_FOCUS.has(t.id) ? 0 : (parseContract(t.description) ? 1 : 2));
+  const batch = taskDispatcher ? tasks.diversifyBatch(ordered, BATCH, laneSegment) : ordered.slice(0, 1);
 
-  if (candidate) {
-    await workTask(candidate).catch(err => log('workTask error:', err.message));
+  if (batch.length) {
+    // M2 (Vikunja #771): when the task-work workflow is enabled and a
+    // dispatcher is injected, each candidate runs as a tracked Hatchet
+    // workflow run (per-task run ID, step retries) instead of an opaque
+    // inline call. A dispatch failure falls back to inline work — loudly
+    // logged — because an unavailable workflow layer must not stall the
+    // engine; completions still go through the verifier either way.
+    const runOne = async (candidate) => {
+      if (taskDispatcher) {
+        try {
+          const out = await taskDispatcher(candidate.id);
+          log(`task #${candidate.id} dispatched as task-work run ${out && out.runId ? out.runId : '(no run id)'}`);
+          return;
+        } catch (err) {
+          log(`task-work dispatch failed for #${candidate.id} (${err.message}) — falling back to inline work`);
+        }
+      }
+      await workTask(candidate).catch(err => log('workTask error:', err.message));
+    };
+    if (taskDispatcher && batch.length > 1) {
+      log(`cycle batch: dispatching ${batch.length} tasks concurrently: ${batch.map(t => '#' + t.id).join(', ')}`);
+      await Promise.allSettled(batch.map(runOne));
+    } else {
+      await runOne(batch[0]);
+    }
     return;
   }
 
@@ -679,6 +842,28 @@ async function runCycle() {
   } finally {
     cycleInFlight = false;
   }
+}
+
+// ─── Task-work workflow seam (M2, Vikunja #771) ─────────────────────────────
+// workTaskById is the task-work workflow's step body: the step input is
+// only a task ID, so the task is re-read from the system of record at
+// execution time. Missing or already-done tasks are skipped — a retried
+// step after a verified completion is a no-op, never a re-work.
+async function workTaskById(taskId, deps = {}) {
+  const getTask = deps.getTask || ((id) => vikunja.getTask('execPM', id));
+  const work = deps.workTask || workTask;
+  const task = await getTask(taskId).catch(() => null);
+  if (!task) return { ran: false, reason: 'not-found' };
+  if (task.done) return { ran: false, reason: 'already-done' };
+  await work(task);
+  return { ran: true, taskId };
+}
+
+// Injected at boot (runStandalone) when MACF_TASK_WORKFLOW=1: a function
+// (taskId) → Promise<{ runId }>. Null = inline work, the pre-M2 path.
+let taskDispatcher = null;
+function setTaskDispatcher(fn) {
+  taskDispatcher = typeof fn === 'function' ? fn : null;
 }
 
 // ─── Service lifecycle ───────────────────────────────────────────────────────
@@ -718,4 +903,4 @@ function stop() {
   log('stopped');
 }
 
-module.exports = { init, stop, runCycle, workTask, isJesseGated, isDormant, isTimeCritical, updateAgentHealth, recordAttempt, isParked, enqueueRelay, drainRelayQueue };
+module.exports = { init, stop, runCycle, workTask, workTaskById, setTaskDispatcher, isJesseGated, isDormant, isTimeCritical, updateAgentHealth, recordAttempt, isParked, enqueueRelay, drainRelayQueue, withExecutionTimeout, EXECUTION_TIMEOUT_MS };

@@ -42,21 +42,30 @@ const path = require('path');
 const ENGINE_DIR = __dirname;
 const GAP_FILE = path.join(ENGINE_DIR, '.engine-gaps.json');
 
-// agentTools computes its SANDBOX from the *calling process's* HOME, so a
-// macf-run engine and a root-run cron see different roots. Cover both.
+// agentTools computes its SANDBOX from the *calling process's* HOME, so
+// cover the running user's home sandbox plus the instance tree's own
+// sandbox (the split layout). US-FW-002 (Nov 17, 2026): the previous
+// candidate list hardcoded three different users' homes from the
+// original deployment; a process only ever needs its OWN home sandbox
+// and the tree it runs from. MACF_SANDBOX_DIR adds an explicit one.
+const os = require('os');
+const instancePaths = require('../utils/instancePaths');
 const SANDBOX_CANDIDATES = [...new Set([
-  path.join(process.env.HOME || '/home/hatch', 'workspace', 'agent-sandbox'),
-  '/home/macf/workspace/agent-sandbox',
-  '/home/hatch/workspace/agent-sandbox',
-])];
+  path.join(os.homedir(), 'workspace', 'agent-sandbox'),
+  instancePaths.instancePath('agent-sandbox'),
+  process.env.MACF_SANDBOX_DIR,
+].filter(Boolean))];
 
 // Roots where an automatic chmod / mkdir is safe. Anything outside these is
-// diagnosed and gapped, never touched.
+// diagnosed and gapped, never touched. Anchored to the checkout (the
+// state dir lives inside it) plus the sandbox candidates; operators on
+// other layouts add roots via MACF_EXTRA_FIXABLE_ROOTS (path-delimited).
+const EXTRA_FIXABLE_ROOTS = (process.env.MACF_EXTRA_FIXABLE_ROOTS || '')
+  .split(path.delimiter).filter(Boolean);
 const FIXABLE_ROOTS = [
   ...SANDBOX_CANDIDATES,
-  '/home/macf/workspace/macf/slack-agents',
-  '/home/hatch/workspace/macf/slack-agents',
-  '/home/sandbox/reports',
+  instancePaths.slackAgentsDir(),
+  ...EXTRA_FIXABLE_ROOTS,
 ];
 
 // ─── Text-pattern detectors: DELETED (Oct 12, 2026 — #724, Phase 2) ─────────
@@ -163,13 +172,10 @@ function attemptFix({ tool, args = {}, errorClass }) {
 // ─── Recording ───────────────────────────────────────────────────────────────
 
 function stateDir() {
-  // Honor the same overrides as utils/state.js (env wins) — also what makes
-  // the auditor unit-testable against a throwaway state dir.
-  if (process.env.RAILWAY_VOLUME_MOUNT_PATH) return process.env.RAILWAY_VOLUME_MOUNT_PATH;
-  if (process.env.MACF_STATE_DIR) return process.env.MACF_STATE_DIR;
-  const canonical = '/home/macf/workspace/macf/slack-agents/.state';
-  try { if (fs.existsSync(canonical)) return canonical; } catch { /* fall through */ }
-  return path.join(ENGINE_DIR, '.state');
+  // The single shared resolver in utils/instancePaths.js (US-FW-002) —
+  // the same overrides as utils/state.js, which is also what makes the
+  // auditor unit-testable against a throwaway state dir.
+  return instancePaths.resolvedStateDir();
 }
 
 function gapFile() {

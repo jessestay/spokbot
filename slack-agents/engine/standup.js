@@ -30,6 +30,7 @@ const path = require('path');
 const CONFIG_PATH = path.join(__dirname, 'scrum-config.json');
 const HEALTH_PATH = path.join(__dirname, '.agent-health.json');
 const GAPS_PATH = path.join(__dirname, '.engine-gaps.json');
+const DEMO_STATE_PATH = path.join(__dirname, '.sprint-demo-state.json');
 
 function loadConfig() {
   try {
@@ -55,6 +56,14 @@ function loadGaps() {
   }
 }
 
+function loadDemoState() {
+  try {
+    return JSON.parse(fs.readFileSync(DEMO_STATE_PATH, 'utf8'));
+  } catch {
+    return {};
+  }
+}
+
 /**
  * Build the standup report from agent health + gaps.
  * Returns { standup: [...], blockers: [...] }
@@ -72,14 +81,27 @@ function buildStandup(health, gaps, config) {
     const completed = h.directivesCompleted || 0;
     const failed = h.directivesFailed || 0;
     const status = h.status || 'unknown';
-    const verified = h.verifiedDeliveries || 0;
+    const verifiedOutcomes = h.verifiedDeliveries || 0;
+    const consecutiveFailures = h.consecutiveFailures || 0;
+    const received = h.directivesReceived || 0;
 
-    // Blocker detection: unhealthy status or high failure rate
-    const isBlocked = status !== 'healthy' || (failed > 0 && completed > 0 && failed / completed > 0.5);
+    // Blocker detection — LIVE failures only (root fix Oct 11, 2026):
+    // directivesFailed/directivesCompleted are LIFETIME cumulative counters that
+    // never reset, so the old rule (status !== 'healthy' || lifetime rate > 0.5)
+    // permanently flagged agents as blockers even when they were currently
+    // healthy (cto: consecutiveFailures=0, recent directives succeeding; lawyer:
+    // no new terminal outcomes in 19h). The self-healer already tracks
+    // lifetime-cumulative AGENT_LOW_DELIVERY gaps separately, so the standup
+    // now escalates only live problems: consecutive failures right now, or an
+    // 'idle' agent that HAS been assigned work but never reached a terminal
+    // outcome (idle with zero directives ever received is "no work", not a
+    // blocker).
+    const isBlocked = consecutiveFailures > 0
+      || (status === 'idle' && received > 0);
 
     standup.push({
       agent,
-      accomplished: `${completed} directives completed, ${verified} verified deliveries (last activity ${lastActivity})`,
+      accomplished: `${completed} directives completed, ${verifiedOutcomes} verified directive outcomes (last activity ${lastActivity})`,
       planning: `status: ${status}`,
       blockers: isBlocked ? `${status}, ${failed} failures — needs scrum master attention` : 'none',
     });
@@ -109,10 +131,36 @@ function buildStandup(health, gaps, config) {
     }
   }
 
-  // Add engine-level gaps as blockers
+  // Add engine-level gaps as blockers.
+  // Stale gaps (an agent demoed AFTER the gap was recorded) are skipped —
+  // otherwise the standup reports blockers that no longer exist. (Oct 11, 2026:
+  // the hourly demo check's gaps lagged behind real demos and produced false
+  // "missing_hourly_demo" blockers for agents that had already demoed.)
+  const demoState = loadDemoState();
+  const lastDemo = (demoState && demoState.lastDemo) || {};
   const recentGaps = (Array.isArray(gaps) ? gaps : []).slice(-5);
   for (const g of recentGaps) {
-    blockers.push(`[engine] ${g.type || 'gap'}: ${(g.detail || '').slice(0, 80)}`);
+    // Closed gaps are resolved — rendering them as blockers is a false
+    // positive (Oct 11, 2026: 4 closed AGENT_MODULE_BROKEN gaps from the
+    // HOME-env false-positive run showed up as live blockers). Legacy gap
+    // records without a status field are still rendered.
+    if (g.status === 'closed') continue;
+    const gapTs = Date.parse(g.timestamp || '');
+    // Gap records from the self-healer carry the agent only in the description
+    // ("cto: CTO delivery rate 34% ..."), not in an `agent` field — without the
+    // fallback below the supersede rule never fired for these gaps (Oct 11,
+    // 2026: an open AGENT_LOW_DELIVERY gap kept rendering as a live standup
+    // blocker even after cto had demoed). A description prefix that matches no
+    // known demo key fails open (renders), so non-agent descriptions are safe.
+    const gapAgent = g.agent || (/^([a-z0-9_]+)\s*:/i.exec(g.description || '') || [])[1];
+    const demoTs = gapAgent && lastDemo[gapAgent] ? Date.parse(lastDemo[gapAgent]) : NaN;
+    if (!Number.isNaN(gapTs) && !Number.isNaN(demoTs) && demoTs > gapTs) continue;
+    // Gap records come from multiple writers with different schemas: the
+    // self-healer writes {issueType, description}, qualityTrends writes
+    // {type, message} (Oct 12, 2026: its rows rendered as empty "[engine]
+    // gap: " lines on the standup). Support both schemas; unknown rows
+    // still render (fail-open).
+    blockers.push(`[engine] ${g.issueType || g.gapType || g.type || 'gap'}: ${(g.description || g.message || '').slice(0, 120)}`);
   }
 
   return { standup, blockers };
@@ -238,16 +286,40 @@ async function main() {
   console.log(message);
 
   // Post to Slack if client available
+  // TOKEN FIX (Oct 10, 2026 — standup run): use slackToken.js so the VM cron
+  // path resolves the custom.slack connector surrogate instead of silently
+  // skipping the #management post when SLACK_BOT_TOKEN is unset.
+  const { resolveSlackToken } = require('./slackToken');
   try {
     const { WebClient } = require('@slack/web-api');
-    const token = process.env.SLACK_BOT_TOKEN;
+    const token = resolveSlackToken();
     if (token) {
       const client = new WebClient(token);
-      await client.chat.postMessage({
-        channel: config.standup.channel || 'C0ASH4TF604',
-        text: message,
-      });
-      console.log('[standup] Posted to #management');
+      // DEDUP: skip if a standup was already posted to #management within the
+      // max standup age window (prevents double posts on retries).
+      const channelId = config.standup.channel || 'C0ASH4TF604';
+      const maxAge = config.standup.max_standup_age_minutes || 90;
+      const cutoff = Date.now() - maxAge * 60 * 1000;
+      let alreadyPosted = false;
+      try {
+        const hist = await client.conversations.history({ channel: channelId, limit: 10 });
+        alreadyPosted = (hist.messages || []).some(m =>
+          (m.text || '').includes('Hourly Standup') && parseFloat(m.ts) * 1000 > cutoff
+        );
+      } catch (histErr) {
+        console.log('[standup] history check skipped:', histErr.message);
+      }
+      if (!alreadyPosted) {
+        await client.chat.postMessage({
+          channel: channelId,
+          text: message,
+        });
+        console.log('[standup] Posted to #management');
+      } else {
+        console.log('[standup] Standup already posted in window — skipping duplicate');
+      }
+    } else {
+      console.log('[standup] Slack post skipped: no token (SLACK_BOT_TOKEN unset, surrogate unavailable)');
     }
   } catch (e) {
     console.log('[standup] Slack post skipped:', e.message);

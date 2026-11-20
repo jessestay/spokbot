@@ -27,7 +27,12 @@ const { execFileSync, execSync } = require('child_process');
 const fs = require('fs');
 const path = require('path');
 
-const ENGINE_DIR = path.join(process.env.HOME, 'workspace/macf/slack-agents');
+// ROOT FIX (Oct 11, 2026): resolve ENGINE_DIR from the script's own location,
+// not process.env.HOME. Bare `runuser -u macf` sets HOME=/home/macf, which made
+// ENGINE_DIR point at a nonexistent dir, so every module-load check threw
+// MODULE_NOT_FOUND and the healer flagged all 11 agents AGENT_MODULE_BROKEN
+// (false positive + gap noise on every such run).
+const ENGINE_DIR = path.join(__dirname, '..');
 const HEAL_LOG = path.join(ENGINE_DIR, 'engine/.self-heal-log.json');
 const LEARN_FILE = path.join(ENGINE_DIR, 'engine/.delivery-learnings.json');
 const AGENT_HEALTH_FILE = path.join(ENGINE_DIR, 'engine/.agent-health.json');
@@ -88,6 +93,37 @@ function loadAgentHealth() {
 
 function saveAgentHealth(health) {
   fs.writeFileSync(AGENT_HEALTH_FILE, JSON.stringify(health, null, 2));
+}
+
+// CLOSE-ON-RECOVERY (Oct 12, 2026): close stale open delivery gaps when an
+// agent's health is verified recovered. Open gaps render as live standup
+// blockers every hour, so a gap left open after the underlying failure
+// cleared is an hourly false alarm. Matches on the agent id in the gap
+// description (self-healer gaps carry the id only there) and on
+// AGENT_CONSECUTIVE_FAILURES / AGENT_LOW_DELIVERY issue types.
+function closeDeliveryGaps(agentId, resolution) {
+  const GAP_FILE = path.join(ENGINE_DIR, 'engine/.engine-gaps.json');
+  let gaps;
+  try { gaps = JSON.parse(fs.readFileSync(GAP_FILE, 'utf8')); }
+  catch { return 0; }
+  let closed = 0;
+  for (const g of gaps) {
+    if (!g || g.status !== 'open') continue;
+    const isDelivery = g.issueType === 'AGENT_CONSECUTIVE_FAILURES' ||
+      g.issueType === 'AGENT_LOW_DELIVERY' ||
+      g.gapType === 'delivery';
+    if (!isDelivery) continue;
+    if (!agentId || !(g.description || '').includes(agentId)) continue;
+    g.status = 'closed';
+    g.closedAt = new Date().toISOString();
+    g.resolution = resolution;
+    closed++;
+  }
+  if (closed > 0) {
+    fs.writeFileSync(GAP_FILE, JSON.stringify(gaps, null, 2));
+    console.log(`[healer] Closed ${closed} stale delivery gap(s) for ${agentId}: ${resolution}`);
+  }
+  return closed;
 }
 
 // Check each agent's health by examining:
@@ -169,6 +205,12 @@ async function checkAgentHealth() {
         } else {
           h.status = 'healthy';
           h.consecutiveFailures = 0;
+          // CLOSE-ON-RECOVERY (Oct 12, 2026): an open delivery-type gap for
+          // an agent whose health is verified healthy is stale — the standup
+          // renders open gaps as live blockers, so leaving it open nags every
+          // hour after the real problem is gone (Oct 12: execPM's 25-failure
+          // gap stayed open long after consecutiveFailures reset to 0).
+          closeDeliveryGaps(agentId, 'agent health verified healthy (consecutiveFailures=0)');
         }
       } else {
         h.status = 'idle'; // No directives yet, not a failure
@@ -200,7 +242,87 @@ const VERIFICATION_TESTS = {
     const result = await checkTaskStaleness();
     return result.criticalStale === 0;
   },
+  // #807 Phase 3 (US-P3.4): low-delivery repairs verify against the
+  // postcondition outcomes ledger — the agent's directives since the
+  // repair must show verified world-state delivery (>=3 postconditions
+  // checked, >=80% satisfied). Until tonight these entries had NO test
+  // and could only sit 'initiated' or escalate to needs_ceo; now a
+  // genuinely recovered agent closes as verified.
+  AGENT_LOW_DELIVERY: async (entry) => {
+    const agentId = entry && entry.agentId;
+    if (!agentId) return false;
+    const sinceMs = entry.timestamp ? (Date.parse(entry.timestamp) || 0) : 0;
+    const { postconditionStatsByAgent } = require('./directivePostconditions');
+    const stats = postconditionStatsByAgent(agentId, sinceMs);
+    return stats.checked >= 3 && stats.rate >= 0.8;
+  },
+  AGENT_CONSECUTIVE_FAILURES: async (entry) => {
+    const agentId = entry && entry.agentId;
+    if (!agentId) return false;
+    const sinceMs = entry.timestamp ? (Date.parse(entry.timestamp) || 0) : 0;
+    const { postconditionStatsByAgent } = require('./directivePostconditions');
+    const stats = postconditionStatsByAgent(agentId, sinceMs);
+    return stats.checked >= 3 && stats.rate >= 0.8;
+  },
 };
+
+// Run an issue type's verification test and translate the outcome into a
+// repair disposition. A repair is VERIFIED (true) only when its test
+// actually passes. A failing test, a test that errors (e.g. Vikunja down),
+// or a type with no test defined leaves the repair 'initiated' — still
+// open, to be resolved by the re-check pass in a later cycle. 'initiated'
+// is a pending state, never a silent terminal one (M4, Vikunja #771).
+async function verifyWithTest(issueType, arg) {
+  const test = VERIFICATION_TESTS[issueType];
+  if (typeof test !== 'function') return 'initiated';
+  try {
+    return (await test(arg)) ? true : 'initiated';
+  } catch (e) {
+    console.log(`[healer] Verification test for ${issueType} errored: ${e.message} — repair stays initiated`);
+    return 'initiated';
+  }
+}
+
+// Re-check pass (M4): resolve repairs that earlier cycles left at
+// 'initiated'. For each such entry with a verification test: pass ->
+// verified (closed, with timestamp); fail -> stays initiated with a
+// recheck count, and an entry older than 24h that has now failed at
+// least 2 re-checks escalates to 'needs_ceo' so it surfaces instead of
+// sitting invisible forever. Mutates the passed-in heal log; returns a
+// summary including the entries that became verified.
+async function recheckInitiatedRepairs(log, tests = VERIFICATION_TESTS, nowMs = Date.now()) {
+  const summary = { verified: 0, escalated: 0, stillPending: 0, verifiedEntries: [] };
+  const DAY_MS = 24 * 3600 * 1000;
+  for (const entry of (log && log.repairs) || []) {
+    if (!entry || entry.verification !== 'initiated') continue;
+    const test = tests ? tests[entry.issueType] : null;
+    if (typeof test !== 'function') continue;
+    let passed = false;
+    // The entry itself is the test's context (agentId, timestamp) —
+    // tests that need neither simply ignore it.
+    try { passed = !!(await test(entry)); } catch { passed = false; }
+    if (passed) {
+      entry.verification = true;
+      entry.verifiedAt = new Date(nowMs).toISOString();
+      summary.verified++;
+      summary.verifiedEntries.push(entry);
+      console.log(`[healer] Re-check VERIFIED: ${entry.issueType} repair from ${entry.timestamp} now passes its verification test`);
+      continue;
+    }
+    entry.rechecks = (entry.rechecks || 0) + 1;
+    entry.lastRecheckAt = new Date(nowMs).toISOString();
+    const ageMs = nowMs - (Date.parse(entry.timestamp) || nowMs);
+    if (ageMs > DAY_MS && entry.rechecks >= 2) {
+      entry.verification = 'needs_ceo';
+      entry.escalatedAt = new Date(nowMs).toISOString();
+      summary.escalated++;
+      console.log(`[healer] Re-check ESCALATED: ${entry.issueType} repair from ${entry.timestamp} still failing after ${entry.rechecks} re-checks — needs CEO`);
+    } else {
+      summary.stillPending++;
+    }
+  }
+  return summary;
+}
 
 function loadHealLog() {
   try {
@@ -374,10 +496,12 @@ async function checkTaskStaleness() {
     const staleTasks = criticalLines.map(line => {
       const m = line.match(/#(\d+)\s+\[(\w+)\]/);
       if (!m) return null;
-      // Jesse-gated detection (Oct 7, 2026): tasks with "Jesse" + "approval"
-      // in the title are waiting on Jesse, not on engine auto-link.
+      // Jesse-gated detection: use the SHARED predicate (utils/jesseGate.js,
+      // M3) so the healer and the work engine never disagree about the
+      // gate. The old local rule ("Jesse" + "approval" anywhere in the
+      // title) misread workflow titles like #82's as Jesse-gated.
       const title = line.slice(m.index + m[0].length);
-      const jesseGated = /jesse/i.test(title) && /approv/i.test(title);
+      const jesseGated = require('../utils/jesseGate').isJesseGatedTitle(title);
       return { id: parseInt(m[1]), owner: m[2], title: title.trim().slice(0, 80), jesseGated };
     }).filter(Boolean);
 
@@ -743,7 +867,13 @@ async function repair(issue) {
       }
 
       repairAction = `Directly assigned ${assignedCount}/${issue.count} tasks via API (no Slack nudge)`;
-      verificationPassed = assignedCount > 0 ? 'initiated' : false;
+      // M4: the assignment is synchronous, so verify it right now with the
+      // real test (re-read assignments) instead of stamping 'initiated'
+      // and never looking again. A failed/errored test stays 'initiated'
+      // and is resolved by the re-check pass in later cycles.
+      verificationPassed = assignedCount > 0
+        ? await verifyWithTest('UNASSIGNED_TASKS')
+        : false;
       break;
 
     case 'STALE_TASKS':
@@ -794,6 +924,7 @@ async function repair(issue) {
   const repair = {
     timestamp: new Date().toISOString(),
     issueType: issue.type,
+    agentId: issue.agentId || null,
     severity: issue.severity,
     action: repairAction,
     verification: verificationPassed,
@@ -832,6 +963,29 @@ async function repair(issue) {
 
 async function main() {
   console.log('[healer] Starting self-heal cycle...');
+
+  // M4 RE-CHECK PASS: resolve repairs that earlier cycles left at
+  // 'initiated'. Runs BEFORE diagnosis so yesterday's open repairs get
+  // verified (or escalated) instead of being forgotten.
+  try {
+    const healLog = loadHealLog();
+    const recheck = await recheckInitiatedRepairs(healLog);
+    if (recheck.verified > 0 || recheck.escalated > 0 || recheck.stillPending > 0) {
+      saveHealLog(healLog);
+      console.log(`[healer] Re-check pass: ${recheck.verified} verified, ${recheck.escalated} escalated to needs_ceo, ${recheck.stillPending} still pending`);
+      if (recheck.verifiedEntries.length > 0) {
+        const learnings = loadLearnings();
+        if (!learnings.healPatterns) learnings.healPatterns = {};
+        for (const e of recheck.verifiedEntries) {
+          if (!learnings.healPatterns[e.issueType]) learnings.healPatterns[e.issueType] = { attempts: 0, verified: 0 };
+          learnings.healPatterns[e.issueType].verified++;
+        }
+        fs.writeFileSync(LEARN_FILE, JSON.stringify(learnings, null, 2));
+      }
+    }
+  } catch (e) {
+    console.error('[healer] Re-check pass failed:', e.message);
+  }
 
   // MISSING-CAPABILITY DRAIN (Jesse's standing rule): agents that lack the
   // tools/tech/code/architecture to complete a request emit a structured
@@ -885,7 +1039,11 @@ async function main() {
   fs.writeFileSync(LEARN_FILE, JSON.stringify(learnings, null, 2));
 }
 
-main().catch(e => {
-  console.error('[healer] Self-heal cycle failed:', e.message);
-  process.exit(1);
-});
+module.exports = { VERIFICATION_TESTS, verifyWithTest, recheckInitiatedRepairs };
+
+if (require.main === module) {
+  main().catch(e => {
+    console.error('[healer] Self-heal cycle failed:', e.message);
+    process.exit(1);
+  });
+}

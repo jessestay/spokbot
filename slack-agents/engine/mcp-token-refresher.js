@@ -5,10 +5,13 @@
 'use strict';
 
 const fs = require('fs');
+const os = require('os');
 const path = require('path');
 const https = require('https');
 
-const AUTH_DIR = path.join(process.env.HOME || '/home/hatch', '.mcp-auth', 'mcp-remote-v1');
+// US-FW-002: MCP_AUTH_DIR env wins; otherwise the mcp-remote auth cache
+// under the operator's own home (os.homedir() anchor, no literal user).
+const AUTH_DIR = process.env.MCP_AUTH_DIR || path.join(os.homedir(), '.mcp-auth', 'mcp-remote-v1');
 const REFRESH_BUFFER_MS = 15 * 60 * 1000; // Refresh if expiring within 15 min
 
 // Map server hash -> token endpoint(s). tokenUrls is a fallback list: each is tried in order.
@@ -137,7 +140,14 @@ async function main() {
   console.log(`[refresher] Done. Refreshed ${refreshed} token(s).`);
 }
 
-main().catch(e => {
-  console.error('[refresher] Fatal:', e.message);
-  process.exit(1);
-});
+if (require.main === module) {
+  main().catch(e => {
+    console.error('[refresher] Fatal:', e.message);
+    process.exit(1);
+  });
+}
+
+module.exports = {
+  // test hooks
+  _AUTH_DIR: AUTH_DIR,
+};

@@ -194,10 +194,17 @@ async function main() {
         // as active but excluded from staleness alerts.
         const isLockTask = /engine lock/i.test(t.title || '');
         const knownWaitingReason = KNOWN_WAITING[t.id];
+        // P1.6 (Oct 12, 2026 — WIP cap): tasks parked via the [PARKED]
+        // description marker are intentionally out of the active set until
+        // throughput is proven. Visible, not alerted — same as known-waiting.
+        const isWipParked = /hold-001|on hold|\bparked\b|guardrail/i
+          .test(`${t.title || ''} ${t.description || ''}`);
 
         if (knownWaitingReason) {
           // Intentionally parked by Jesse's decision — visible, not alerted.
           report.knownWaiting.push({ ...entry, reason: knownWaitingReason });
+        } else if (isWipParked) {
+          report.knownWaiting.push({ ...entry, reason: 'WIP cap parked Oct 12 (#716) — restore by removing [PARKED] marker' });
         } else if (!isLockTask && hours >= STALE_CRITICAL) {
           report.stale.push({ ...entry, severity: 'CRITICAL' });
         } else if (!isLockTask && hours >= STALE_WARNING) {
@@ -219,7 +226,9 @@ async function main() {
 
   // Output report
   console.log(`[team-monitor] ${now}`);
-  console.log(`  Active tasks: ${report.active.length}`);
+  // P1.6: "active" means actionable — parked tasks are reported separately.
+  const actionable = report.active.length - report.knownWaiting.length;
+  console.log(`  Active tasks: ${actionable} actionable (${report.active.length} total incl. parked)`);
   console.log(`  Stale: ${report.stale.length}`);
   console.log(`  Known-waiting (intentionally parked, not alerted): ${report.knownWaiting.length}`);
   console.log(`  Delivered this run: ${report.delivered.length}`);

@@ -176,6 +176,7 @@ describe('Expert skill lenses', () => {
     'justin-welsh': 'JUSTIN WELSH lens',
     'sam-parr': 'SAM PARR lens',
     'richard-millington': 'RICHARD MILLINGTON lens',
+    'tj-robertson': 'TJ ROBERTSON lens',
     'jesse-voice': 'JESSE STAY VOICE lens',
   };
 

@@ -134,7 +134,11 @@ async function scanForDemos() {
   let token;
   try {
     const fetch = `import sys
-sys.path.insert(0, '/opt/hatch/skills/skill-creator/bin')
+import os as _os
+for _p in ('/opt/hatch/skills/skill-creator/bin', '/opt/muse/skills/custom-connector-setup/bin', '/opt/hatch/workflow-skills/custom-connector-setup/bin'):
+    if _os.path.exists(_p + '/dynamic_credentials.py'):
+        sys.path.insert(0, _p)
+        break
 from dynamic_credentials import dynamic_credential_entry
 entry = dynamic_credential_entry('custom.slack')
 sys.stdout.write(entry['surrogate'])`;

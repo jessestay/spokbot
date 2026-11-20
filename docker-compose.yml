@@ -1,0 +1,92 @@
+# Spokbot one-command install (draft — US-FW-005).
+#   cp slack-agents/.env.example slack-agents/.env   # fill in tokens
+#   mkdir -p instance
+#   docker compose up -d
+# See the README section "Run with Docker (one command)" for the full
+# walkthrough, including the one-time Vikunja token step.
+services:
+  engine:
+    build: .
+    env_file:
+      - slack-agents/.env
+    environment:
+      SPOKBOT_INSTANCE_DIR: /instance
+      SPOKBOT_STATE_DIR: /state
+      # The token itself stays in slack-agents/.env (VIKUNJA_TOKEN);
+      # only the URL is wiring, so it lives here.
+      VIKUNJA_URL: http://vikunja:3456/api/v1/
+    volumes:
+      - ./instance:/instance
+      - spokbot-state:/state
+    depends_on:
+      - vikunja
+      - gateway
+    restart: unless-stopped
+
+  gateway:
+    # Self-hosted LiteLLM proxy (OpenAI-compatible) on :4000,
+    # configured by the committed gateway/litellm_config.yaml.
+    # Provider keys are read from the gateway config / environment —
+    # never baked into this file.
+    image: ghcr.io/berriai/litellm:main-latest
+    command: ["--config", "/app/config.yaml", "--port", "4000"]
+    # The gateway's master key (and any provider keys the config
+    # references via os.environ/) come from the stack's one secrets
+    # file — current LiteLLM refuses to start with no master key
+    # set (found in the Step 7 live verification, 2026-11-19).
+    env_file:
+      - slack-agents/.env
+    volumes:
+      - ./gateway/litellm_config.yaml:/app/config.yaml:ro
+    ports:
+      - "4000:4000"
+    restart: unless-stopped
+
+  vikunja:
+    # The task board the engine works from. On first run, open
+    # http://localhost:3456, create the owner account and an API
+    # token, put the token in slack-agents/.env as VIKUNJA_TOKEN,
+    # then `docker compose restart engine`.
+    image: vikunja/vikunja:latest
+    environment:
+      VIKUNJA_SERVICE_PUBLICURL: http://localhost:3456/
+    volumes:
+      - vikunja-data:/app/vikunja/files
+      - vikunja-db:/db
+    ports:
+      - "3456:3456"
+    depends_on:
+      vikunja-init:
+        condition: service_completed_successfully
+    restart: unless-stopped
+
+  vikunja-init:
+    # The vikunja image runs as uid 1000 with the binary itself as
+    # entrypoint — there is no root init step to fix permissions,
+    # and fresh named volumes are created root-owned, so vikunja
+    # crash-loops: first on the files dir ("storage validation
+    # failed … permission denied"), then on its SQLite path /db
+    # (both found in the Step 7 live verification, 2026-11-19).
+    # Chown both volumes to the app's uid before vikunja starts.
+    image: busybox:latest
+    command: ["chown", "-R", "1000:1000", "/app/vikunja/files", "/db"]
+    volumes:
+      - vikunja-data:/app/vikunja/files
+      - vikunja-db:/db
+
+  ollama:
+    # Optional local model server for the local-first routing
+    # profile. Start with: docker compose --profile local-models up -d
+    image: ollama/ollama:latest
+    profiles: ["local-models"]
+    volumes:
+      - ollama-data:/root/.ollama
+    ports:
+      - "11434:11434"
+    restart: unless-stopped
+
+volumes:
+  spokbot-state:
+  vikunja-data:
+  vikunja-db:
+  ollama-data:

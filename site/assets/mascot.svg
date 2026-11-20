@@ -1,0 +1,35 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 240 240" role="img" aria-labelledby="t d">
+  <title id="t">Spokbot mascot</title>
+  <desc id="d">An original friendly robot head with tall pointed fin ears and a single antenna.</desc>
+  <!-- Spokbot mascot — original character. Palette: navy outline, teal, cream, coral. -->
+  <defs>
+    <clipPath id="headClip">
+      <rect x="58" y="92" width="124" height="118" rx="30"/>
+    </clipPath>
+  </defs>
+  <!-- pointed fin ears, behind the head -->
+  <path d="M62 208 C50 150 40 84 34 28 C58 58 84 92 98 122 C88 156 76 184 62 208 Z"
+        fill="#4FAFB2" stroke="#14264C" stroke-width="9" stroke-linejoin="round"/>
+  <path d="M178 208 C190 150 200 84 206 28 C182 58 156 92 142 122 C152 156 164 184 178 208 Z"
+        fill="#4FAFB2" stroke="#14264C" stroke-width="9" stroke-linejoin="round"/>
+  <!-- antenna -->
+  <path d="M120 100 L120 56" stroke="#14264C" stroke-width="10" stroke-linecap="round"/>
+  <circle cx="120" cy="40" r="18" fill="#14264C"/>
+  <circle cx="120" cy="40" r="9" fill="#F97362"/>
+  <!-- head -->
+  <rect x="58" y="92" width="124" height="118" rx="30"
+        fill="#4FAFB2" stroke="#14264C" stroke-width="9"/>
+  <!-- chin band, clipped to the head -->
+  <g clip-path="url(#headClip)">
+    <path d="M52 180 Q120 167 188 180 L188 216 L52 216 Z" fill="#F6EFDB"/>
+    <path d="M52 180 Q120 167 188 180" fill="none" stroke="#14264C" stroke-width="8"/>
+    <circle cx="84" cy="194" r="6" fill="#F97362"/>
+  </g>
+  <!-- eyes: calm ovals -->
+  <ellipse cx="93" cy="140" rx="12" ry="17" fill="#F6EFDB"/>
+  <ellipse cx="147" cy="140" rx="12" ry="17" fill="#F6EFDB"/>
+  <ellipse cx="93" cy="141" rx="6" ry="10" fill="#14264C"/>
+  <ellipse cx="147" cy="141" rx="6" ry="10" fill="#14264C"/>
+  <!-- mouth: small, level, logical -->
+  <path d="M107 169 Q120 174 133 169" fill="none" stroke="#14264C" stroke-width="7" stroke-linecap="round"/>
+</svg>

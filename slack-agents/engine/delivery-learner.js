@@ -233,7 +233,11 @@ async function audit() {
   let token;
   try {
     const fetch = `import sys
-sys.path.insert(0, '/opt/hatch/skills/skill-creator/bin')
+import os as _os
+for _p in ('/opt/hatch/skills/skill-creator/bin', '/opt/muse/skills/custom-connector-setup/bin', '/opt/hatch/workflow-skills/custom-connector-setup/bin'):
+    if _os.path.exists(_p + '/dynamic_credentials.py'):
+        sys.path.insert(0, _p)
+        break
 from dynamic_credentials import dynamic_credential_entry
 entry = dynamic_credential_entry('custom.slack')
 sys.stdout.write(entry['surrogate'])`;
@@ -308,11 +312,21 @@ sys.stdout.write(entry['surrogate'])`;
       }
     });
 
+  // #807 US-P3.5: anchor delivery quality to verified world-state —
+  // the postcondition outcomes ledger (finalize-checked artifacts),
+  // recorded per agent alongside the message-score patterns.
+  const pcByAgent = {};
+  try {
+    const dp = require('./directivePostconditions');
+    for (const a of dp.postconditionAgents()) pcByAgent[a] = dp.postconditionStatsByAgent(a);
+  } catch { /* ledger is additive evidence */ }
+
   for (const [agent, stats] of Object.entries(byAgent)) {
     learnings.patterns[agent] = {
       avgScore: stats.count > 0 ? (stats.total / stats.count).toFixed(2) : '0.00',
       messageCount: stats.count,
       signalBreakdown: stats.signals,
+      postconditions: pcByAgent[agent] || { checked: 0, satisfied: 0, failed: 0, rate: 0 },
       scoringVersion: 2,
       bestDelivery: stats.best ? {
         score: stats.best.score,

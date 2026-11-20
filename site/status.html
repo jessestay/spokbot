@@ -1,0 +1,80 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Spokbot — Build Status</title>
+<style>
+  body { font-family: system-ui, sans-serif; margin: 2rem auto; max-width: 72rem; padding: 0 1rem; color: #1a1a1a; }
+  h1 { font-size: 1.6rem; } h2 { font-size: 1.15rem; margin-top: 2rem; }
+  .cards { display: flex; flex-wrap: wrap; gap: 1rem; }
+  .card { border: 1px solid #ccc; border-radius: 0.5rem; padding: 1rem 1.25rem; min-width: 9rem; }
+  .card .n { font-size: 1.8rem; font-weight: 700; }
+  .card .k { color: #555; font-size: 0.85rem; }
+  table { border-collapse: collapse; width: 100%; font-size: 0.9rem; }
+  th, td { border-bottom: 1px solid #ddd; padding: 0.4rem 0.5rem; text-align: left; vertical-align: top; }
+  th { border-bottom: 2px solid #999; }
+  footer { color: #555; font-size: 0.85rem; margin-top: 2rem; }
+</style>
+</head>
+<body>
+<h1>Spokbot — Build Status</h1>
+<p>Every unit of work in Spokbot is a user story with acceptance
+criteria, built BDD-first, then TDD. This page is generated from
+the repository's own story registry
+(<code>tests/fixtures/user-stories.fixture.json</code>) scored by
+the repository's own lints (storyLint + linkageLint) — the same
+checks the automated suites enforce. Nothing here is typed by
+hand; regenerate with <code>node site/build-status.mjs</code>.</p>
+
+<div class="cards">
+  <div class="card"><div class="n" data-metric="stories-total">26</div><div class="k">stories in the registry</div></div>
+  <div class="card"><div class="n" data-metric="with-both">24</div><div class="k">with BDD + TDD evidence</div></div>
+  <div class="card"><div class="n" data-metric="bdd-only">0</div><div class="k">BDD only</div></div>
+  <div class="card"><div class="n" data-metric="neither">2</div><div class="k">no tests linked</div></div>
+  <div class="card"><div class="n" data-metric="dangling">0</div><div class="k">dangling references</div></div>
+  <div class="card"><div class="n" data-metric="tests-linked">166/166</div><div class="k">test files linked to stories</div></div>
+  <div class="card"><div class="n" data-metric="features-linked">24/24</div><div class="k">feature files linked to stories</div></div>
+  <div class="card"><div class="n" data-metric="lint-errors">0</div><div class="k">lint errors</div></div>
+</div>
+
+<h2>Stories</h2>
+<table>
+  <thead><tr><th>ID</th><th>Story</th><th>Points</th><th>Status</th><th>Acceptance criteria</th><th>Test evidence</th></tr></thead>
+  <tbody>
+    <tr><td>US-101</td><td>As the engine, I want every tool execution to issue a structured receipt, so that completion decisions never depend on an agent's prose</td><td>8</td><td>in-progress</td><td>3</td><td>BDD + TDD</td></tr>
+    <tr><td>US-102</td><td>As the CEO agent, I want to query what an agent actually did on a task, so that my standup reports effects, not claims</td><td>3</td><td>in-progress</td><td>1</td><td>BDD + TDD</td></tr>
+    <tr><td>US-103</td><td>As Jesse (investor), I want a task to be markable done only when its postconditions verify against the real world, so that 'done' on my board always means the work observably happened</td><td>8</td><td>in-progress</td><td>3</td><td>BDD + TDD</td></tr>
+    <tr><td>US-104</td><td>As a working agent, I want the engine to tell me mechanically which postcondition failed, so that my next attempt fixes the actual gap instead of re-reading my own prose</td><td>3</td><td>in-progress</td><td>1</td><td>BDD + TDD</td></tr>
+    <tr><td>US-105</td><td>As the engine, I want contracted tasks to accept only schema-valid deliverables, so that tool-call syntax or narration in the final text is a failed attempt by construction</td><td>5</td><td>in-progress</td><td>2</td><td>BDD + TDD</td></tr>
+    <tr><td>US-106</td><td>As a working agent, I want a wrong argument name to come back as a machine-readable correction, so that I can fix the call mechanically on the next round</td><td>5</td><td>in-progress</td><td>2</td><td>BDD + TDD</td></tr>
+    <tr><td>US-107</td><td>As the CEO agent, I want mechanical task shapes to run as code, so that fetching, checking, and filing happen identically every cycle with no model in the loop</td><td>8</td><td>in-progress</td><td>2</td><td>BDD + TDD</td></tr>
+    <tr><td>US-108</td><td>As Jesse (investor), I want every demo relayed to me to be backed by a receipt whose artifact still verifies, so that a link I click is a thing the engine itself made and just re-checked</td><td>5</td><td>in-progress</td><td>2</td><td>BDD + TDD</td></tr>
+    <tr><td>US-109</td><td>As the CEO agent, I want tool-usage telemetry computed from the receipts ledger, so that standup numbers describe recorded events rather than regex inferences</td><td>3</td><td>in-progress</td><td>1</td><td>BDD + TDD</td></tr>
+    <tr><td>US-110</td><td>As a business owner, I want the weekly content batch produced by the MACF team on the team's own schedule, so that Monday's drafts are the team's work and blockers surface the same day</td><td>5</td><td>in-progress</td><td>4</td><td>BDD + TDD</td></tr>
+    <tr><td>US-111</td><td>As Jesse (investor/chairman), I want the MACF team to submit job applications itself through its own browser execution seat, so that submissions do not depend on the CEO's personal browser.</td><td>13</td><td>in-progress</td><td>2</td><td>BDD + TDD</td></tr>
+    <tr><td>US-112</td><td>As Jesse, I want the applications ledger to be append-only, so that recorded submissions can never be lost or silently reverted to an earlier stage.</td><td>8</td><td>in-progress</td><td>2</td><td>BDD + TDD</td></tr>
+    <tr><td>US-113</td><td>As Jesse, I want approved social content to publish as live posts, so that content work produces visible outcomes and not only drafts.</td><td>8</td><td>in-progress</td><td>2</td><td>BDD + TDD</td></tr>
+    <tr><td>US-114</td><td>As Jesse, I want SEO recommendations turned into changed pages on staynalive.com, so that SEO counts as action, not just knowledge.</td><td>8</td><td>in-progress</td><td>1</td><td>BDD + TDD</td></tr>
+    <tr><td>US-115</td><td>As Jesse, I want client deliverables counted only when actually sent, so that drafts are never reported as deliveries.</td><td>3</td><td>in-progress</td><td>1</td><td>BDD + TDD</td></tr>
+    <tr><td>US-116</td><td>As the CEO, I want every MCP baseline server verified daily in the engine's own runtime context, so that a server cannot be fixed in one context and broken in the one the team uses.</td><td>8</td><td>in-progress</td><td>1</td><td>BDD + TDD</td></tr>
+    <tr><td>US-117</td><td>As the CEO, I want the directive dead-letter store inspected daily, so that no directive dies silently.</td><td>5</td><td>in-progress</td><td>1</td><td>BDD + TDD</td></tr>
+    <tr><td>US-118</td><td>As Jesse, I want every recurring team function to exist as a story in the planning system before it runs, so that no work is invisible to the team or to me.</td><td>5</td><td>in-progress</td><td>1</td><td>BDD + TDD</td></tr>
+    <tr><td>US-119</td><td>As Jesse, I want the CFO to run a daily finance snapshot and land every newly discovered expense in my budget sheet in the same pass, so that revenue operations reflect real money movement, not plans.</td><td>5</td><td>in-progress</td><td>1</td><td>BDD + TDD</td></tr>
+    <tr><td>US-120</td><td>As Jesse, I want AI audit outreach batches sent on schedule with replies watched continuously and follow-ups drafted for my one-click review, so that the 50 AI Readiness Audit pipeline produces conversations, not silence.</td><td>5</td><td>in-progress</td><td>1</td><td>No tests linked</td></tr>
+    <tr><td>US-121</td><td>As Jesse, I want my Facebook, Instagram, LinkedIn, and Threads messages watched and real messages triaged with drafts in my voice for my approval, so that no genuine message waits unanswered and nothing sends without my go-ahead.</td><td>5</td><td>in-progress</td><td>1</td><td>No tests linked</td></tr>
+    <tr><td>US-122</td><td>As Jesse, I want every agent to produce visible demos that are relayed to me after the agent demos to the CEO, so that silence from any agent is treated as breakage, not as a quiet week.</td><td>3</td><td>in-progress</td><td>1</td><td>BDD + TDD</td></tr>
+    <tr><td>US-123</td><td>As Jesse, I want the engine, Vikunja, gateway, and n8n kept up by a watchdog that auto-restores known failure classes, so that health means workflows actually execute, not that a heartbeat is fresh.</td><td>8</td><td>in-progress</td><td>1</td><td>BDD + TDD</td></tr>
+    <tr><td>US-FW-018</td><td>As a Spokbot operator, I want Vikunja supervised by a watchdog that restarts it with setsid and never kills itself, so that the team's board survives session teardown and never dies silently</td><td>3</td><td>in-progress</td><td>4</td><td>BDD + TDD</td></tr>
+    <tr><td>US-FW-025</td><td>As a Spokbot operator, I want the autonomous driver verifiably scheduled, so that a working driver script with no schedule is detected as a critical defect instead of agents going silent</td><td>3</td><td>in-progress</td><td>3</td><td>BDD + TDD</td></tr>
+    <tr><td>US-FW-031</td><td>As the CEO of the Spokbot team, I want requirements broken down into assigned user stories by the PM, so that a content or visual requirement becomes platform-sized stories with acceptance criteria on the board instead of one vague ask</td><td>3</td><td>in-progress</td><td>3</td><td>BDD + TDD</td></tr>
+  </tbody>
+</table>
+
+<footer>Generated 2026-11-20T01:29:04.554Z by <code>site/build-status.mjs</code>
+from the registry and lint reports in this repository. Story
+lifecycle states mirror the registry as committed; a story marked
+in-progress with complete evidence is lifecycle review debt, and
+the registry lint flags it as such.</footer>
+</body>
+</html>

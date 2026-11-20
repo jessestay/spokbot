@@ -75,4 +75,16 @@ Approval demos MUST support line-level approve/reject.
 A demo without a clickable artifact link is not a demo — it will be rejected.
 `.trim();
 
-module.exports = { AGENT_BASE_RULES, EVIDENCE_REQUIREMENT, DEAD_TOPIC_PATTERNS, DEMO_STANDARD };
+/**
+ * EXECUTION REQUIREMENT (#807 Phase 2, US-P2.4 — harness fix). The root-cause
+ * audit found handlers framing work as "provide an assessment", so agents
+ * assessed because they were told to. generateWithTools appends this to
+ * every delegation system prompt: execution + evidence is the job; an
+ * assessment is only acceptable for the part that genuinely cannot be
+ * executed, with the exact blocker named.
+ */
+const EXECUTION_REQUIREMENT = `
+EXECUTION REQUIREMENT: Execute the work with your tools and return evidence of what was done — do not substitute an assessment, plan, or recommendation for execution. If part of the work cannot be executed, execute everything else and name the exact blocker for the rest in one line (missing tool, missing permission, missing credential, missing input). A reply that only describes what should be done is not a deliverable.
+`.trim();
+
+module.exports = { AGENT_BASE_RULES, EVIDENCE_REQUIREMENT, DEAD_TOPIC_PATTERNS, DEMO_STANDARD, EXECUTION_REQUIREMENT };

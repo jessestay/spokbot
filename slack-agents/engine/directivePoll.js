@@ -18,10 +18,12 @@ const path = require('path');
 const { WebClient } = require('@slack/web-api');
 const { resolveSlackToken } = require('./slackToken');
 const { DELEGATION_TARGETS } = require('../config');
-const { suggestCollaboration } = require('./collaboration');
+const { logEngineGap } = require('./engineGap');
+const { loadPollState, savePollState, POLL_STATE_PATH } = require('./directiveState');
+const directiveFinalize = require('./directiveFinalize');
+const { parseDelegationHeader } = require('./directiveScan');
 
-const STATE_PATH = path.join(__dirname, '.directive-poll-state.json');
-const VERIFY_PATH = path.join(__dirname, '.directive-verify-state.json');
+const STATE_PATH = POLL_STATE_PATH; // engine/.directive-poll-state.json (see directiveState.js)
 // Channels the team actually uses for directives.
 const CHANNELS = [
   'C0ASH4TF604', // #management
@@ -47,28 +49,6 @@ async function resolveChannelId(client, nameOrId) {
 // without checking. In the CCO workshop test the thread had 0 replies despite
 // the success log. This reads back the thread (or channel) and confirms a
 // message with the posted ts exists before the directive is marked complete.
-async function verifyPostLanded(client, channelId, threadTs, postedTs) {
-  if (!postedTs) return false;
-  try {
-    let messages = [];
-    if (threadTs) {
-      const res = await client.conversations.replies({
-        channel: channelId, ts: threadTs, limit: 10,
-      });
-      messages = res.messages || [];
-    } else {
-      const res = await client.conversations.history({
-        channel: channelId, limit: 10,
-      });
-      messages = res.messages || [];
-    }
-    return messages.some(m => m.ts === postedTs);
-  } catch (e) {
-    console.error(`[directivePoll] post verification readback failed:`, e.message);
-    return false;
-  }
-}
-
 // Map directive patterns to verifiers. When a directive matches, it's added
 // to the verification queue so directiveVerify.js can check the outcome.
 function matchVerifier(text) {
@@ -83,88 +63,11 @@ function matchVerifier(text) {
   return null;
 }
 
-function queueForVerification(directiveText, agentId, result) {
-  // Queue EVERY directive for verification, not just pattern-matched ones.
-  // The verifier extracts artifacts (URLs, post IDs, task refs) from the
-  // agent's response and checks them against external systems.
-  let verifyState;
-  try { verifyState = JSON.parse(fs.readFileSync(VERIFY_PATH, 'utf8')); }
-  catch { verifyState = { pending: [], verified: [], failed: [] }; }
-  if (!verifyState.pending) verifyState.pending = [];
-
-  verifyState.pending.push({
-    id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
-    agentId: agentId,
-    directive: directiveText.slice(0, 500),
-    response: (result?.response || '').slice(0, 2000),
-    evidence: (result?.evidence || '').slice(0, 500),
-    timestamp: Date.now()
-  });
-
-  // Keep pending bounded
-  if (verifyState.pending.length > 200) {
-    verifyState.pending = verifyState.pending.slice(-200);
-  }
-
-  fs.writeFileSync(VERIFY_PATH, JSON.stringify(verifyState, null, 2));
-  console.log(`[directivePoll] queued for external verification: ${agentId}`);
-}
-
 const AGENT_IDS = ['execPM', 'cmo', 'cco', 'cfo', 'cro', 'cto', 'cuxo', 'jobcoach', 'lawyer', 'facebook', 'hr'];
 const loadedAgents = {};
 
-const AGENT_HEALTH_PATH = path.join(__dirname, '.agent-health.json');
-
-// HEALTH TRACKING (Oct 4, 2026 — architectural fix):
-// The self-healer was blind because nothing ever updated these counters.
-// The poller now tracks every directive outcome per agent:
-//   - directivesReceived: incremented when a directive is routed to the agent
-//   - directivesCompleted: incremented when the agent returns validated evidence
-//   - directivesFailed: incremented on timeout, error, or no-evidence after retries
-//   - lastActivity: timestamp of last directive handled
-//   - consecutiveFailures: reset on success, incremented on failure
-function updateAgentHealth(agentId, outcome) {
-  // outcome: 'received' | 'completed' | 'failed'
-  try {
-    let health = {};
-    try { health = JSON.parse(fs.readFileSync(AGENT_HEALTH_PATH, 'utf8')); } catch {}
-    if (!health[agentId]) {
-      health[agentId] = {
-        agentId, directivesReceived: 0, directivesCompleted: 0,
-        directivesFailed: 0, lastActivity: null, consecutiveFailures: 0,
-        status: 'unknown',
-      };
-    }
-    const h = health[agentId];
-    const now = new Date().toISOString();
-    if (outcome === 'received') {
-      h.directivesReceived++;
-      h.lastActivity = now;
-    } else if (outcome === 'completed') {
-      h.directivesCompleted++;
-      h.consecutiveFailures = 0;
-      h.lastActivity = now;
-      h.status = 'healthy';
-    } else if (outcome === 'failed') {
-      h.directivesFailed++;
-      h.consecutiveFailures = (h.consecutiveFailures || 0) + 1;
-      h.lastActivity = now;
-      h.status = h.consecutiveFailures >= 3 ? 'failing' : 'degraded';
-    }
-    h.lastChecked = now;
-    fs.writeFileSync(AGENT_HEALTH_PATH, JSON.stringify(health, null, 2));
-  } catch (e) {
-    console.error(`[directivePoll] Health update failed for ${agentId}:`, e.message);
-  }
-}
-
-function loadState() {
-  try { return JSON.parse(fs.readFileSync(STATE_PATH, 'utf8')); }
-  catch { return {}; }
-}
-function saveState(s) {
-  fs.writeFileSync(STATE_PATH, JSON.stringify(s, null, 2));
-}
+function loadState() { return loadPollState(STATE_PATH); }
+function saveState(s) { return savePollState(s, STATE_PATH); }
 
 function getAgent(id) {
   if (!loadedAgents[id]) {
@@ -172,6 +75,21 @@ function getAgent(id) {
   }
   return loadedAgents[id];
 }
+
+// PHASE F (Vikunja #789): the finalize machinery (validation,
+// posting, health, retry/dead-letter/requeue) lives in
+// engine/directiveFinalize.js, shared with the engine-side intake
+// cycle. The poller injects its agent loader here (the
+// utils/delegation init pattern) and re-exports the bound functions
+// below so existing callers and tests are untouched.
+directiveFinalize.init({ getAgent, agentIds: AGENT_IDS });
+const {
+  verifyPostLanded, queueForVerification, updateAgentHealth, linkDirectiveToTask,
+  buildReceiptSummary, queueRetry, dropPendingRetry, drainPendingRetry,
+  drainDeadLetterRequeues, recordRetryFailure, hasVerifiableEvidenceIn,
+  countToolReceiptsSince, hasEvidenceMarker, sanitizePostText, finalizeDelegation,
+  MAX_PENDING_RETRY, REQUEUE_COOLDOWN_MS, MAX_REQUEUES,
+} = directiveFinalize;
 
 // Touch Vikunja: when an agent handles a directive, update their active tasks
 // so the team monitor sees activity instead of stale tasks.
@@ -212,56 +130,6 @@ async function enforceProgress(agentId) {
   return false;
 }
 
-// AUTO-LINK: Every Slack directive creates or updates a Vikunja task.
-// This is the engine fix that makes staleness impossible.
-async function linkDirectiveToTask(agentId, directiveText, responseText) {
-  const vikunjaToken = process.env.VIKUNJA_TOKEN;
-  const vikunjaUrl = process.env.VIKUNJA_URL || 'http://127.0.0.1:3456';
-  if (!vikunjaToken) return null;
-
-  try {
-    // Find the agent's most recent active task, or create a directive-tracking task
-    const prefix = `[${agentId.toUpperCase()}]`;
-
-    for (const pid of [2, 16]) {
-      const res = await fetch(`${vikunjaUrl}/api/v1/projects/${pid}/tasks`, {
-        headers: { 'Authorization': `Bearer ${vikunjaToken}` }
-      });
-      if (!res.ok) continue;
-      const tasks = await res.json();
-
-      // Look for an existing task that matches this directive's topic
-      // For now, update the most recently updated active task for this agent
-      const mine = tasks
-        .filter(t => !t.done && (t.title || '').toUpperCase().startsWith(prefix))
-        .sort((a, b) => new Date(b.updated) - new Date(a.updated));
-
-      if (mine.length > 0) {
-        const task = mine[0];
-        // Append the directive and response as a comment (substantive update)
-        const comment = `[Directive ${new Date().toISOString()}]\n` +
-          `Directive: ${directiveText.slice(0, 300)}\n` +
-          `Response: ${(responseText || 'No response').slice(0, 500)}`;
-
-        await fetch(`${vikunjaUrl}/api/v1/tasks/${task.id}/comments`, {
-          method: 'PUT',
-          headers: {
-            'Authorization': `Bearer ${vikunjaToken}`,
-            'Content-Type': 'application/json'
-          },
-          body: JSON.stringify({ comment })
-        });
-
-        console.log(`[directivePoll] Auto-linked directive to task #${task.id} for ${agentId}`);
-        return task.id;
-      }
-    }
-  } catch (e) {
-    console.error(`[directivePoll] Auto-link failed for ${agentId}:`, e.message);
-  }
-  return null;
-}
-
 // CONCURRENCY (Oct 5, 2026 — Jesse: "add multi threading"):
 // Agent delegations are blocking LLM calls (up to 180s each with chaining).
 // Processing them serially meant 3+ pending directives blew past the 5-minute
@@ -291,7 +159,8 @@ const REVENUE_AGENTS = new Set(['cmo', 'cro', 'cco']);
 function getDirectivePriority(item) {
   const { text, agentId } = item;
   // Jesse's direct directives (from: CEO) get top priority
-  if (/\[from:\s*CEO\s*→/i.test(text)) return PRIORITY.JESSE_DIRECT;
+  const hdr = parseDelegationHeader(text);
+  if (hdr && /^CEO$/i.test(hdr.from)) return PRIORITY.JESSE_DIRECT;
   // Revenue agents get priority
   if (REVENUE_AGENTS.has(agentId.toLowerCase())) return PRIORITY.REVENUE;
   // Default
@@ -328,229 +197,152 @@ async function mapWithConcurrency(items, limit, fn) {
   return results;
 }
 
-// Execute one agent delegation with the hang timeout.
-// Returns the agent's result, or null on timeout/error.
-async function runDelegation(item) {
+// ─── PHASE B (Vikunja #789) — directive execution paths ───────────────────
+// executeDelegation is THE entry point for running one directive's
+// delegation. Two execution paths, one contract (the agent's result, or
+// null on failure — the finalize/retry/dead-letter machinery downstream
+// is unchanged):
+//
+//   WORKFLOW PATH (MACF_DIRECTIVE_WORKFLOW=1 + fresh engine heartbeat):
+//   the directive is registered in the durable intake
+//   (engine/directiveIntake.js); the engine process dispatches it as a
+//   directive-work Hatchet run whose step executes the delegation with
+//   Phase A checkpointing; the poller awaits the intake record and
+//   consumes its result. The agent never executes in this process.
+//
+//   INLINE PATH (the pre-Phase-B behavior, kept as the fail-closed
+//   fallback): the delegation runs in this process — now wrapped in the
+//   same run context (deterministic checkpoint run ID + the durable
+//   checkpoint store), so even the fallback is checkpointed/resumable.
+//
+// The inline path is used ONLY when no workflow run can have started:
+// flag off, engine heartbeat stale (the engine is down — nothing will
+// dispatch), or intake registration itself throwing. A workflow-path
+// failure AFTER registration (the record settles failed, or the wait
+// times out) resolves to null and flows into the existing retry
+// machinery — the agent is NEVER re-executed inline in that case,
+// because a workflow step may still be running it (no double execution).
+const DIRECTIVE_WORKFLOW_HEARTBEAT_MAX_AGE_MS = 90000;
+let _intakeStore = null;
+let _durableCheckpointStore = null;
+
+function workflowModeEnabled() {
+  return process.env.MACF_DIRECTIVE_WORKFLOW === '1';
+}
+
+// PHASE F (Vikunja #789) — fallback-only poller decision. With
+// MACF_ENGINE_INTAKE=1 the engine owns scanning, registration and
+// finalization; this cron poller is the fallback: it stands down
+// while the engine heartbeat is fresh and resumes its full legacy
+// cycle only when the heartbeat is stale (the engine is down).
+// With the flag off, the poller is the primary path, as in Phase B.
+function phaseFFallbackDecision({ engineIntakeFlag, heartbeatFresh } = {}) {
+  if (!engineIntakeFlag) return 'legacy';
+  return heartbeatFresh ? 'noop' : 'fallback';
+}
+function getIntakeStore() {
+  if (!_intakeStore) {
+    const { createIntakeStore, resolveIntakeDir } = require('./directiveIntake');
+    _intakeStore = createIntakeStore(resolveIntakeDir());
+  }
+  return _intakeStore;
+}
+function getDurableCheckpointStore() {
+  if (!_durableCheckpointStore) {
+    const { createDurableCheckpointStore } = require('../utils/checkpointAdapters');
+    _durableCheckpointStore = createDurableCheckpointStore();
+  }
+  return _durableCheckpointStore;
+}
+// Test hook: swap the intake store (temp dir) without touching env/FS layout.
+function __setIntakeStoreForTest(store) { _intakeStore = store; }
+
+// Inline execution — the pre-Phase-B path with its semantics preserved:
+// pass the message ts so the agent can reply in the directive's thread
+// (fixes the "0 replies" bug where agents posted top-level), and the
+// hang envelope from Oct 4/5/6, 2026 (300s: the expert lens context
+// slows generation; concurrent execution means a longer per-delegation
+// timeout doesn't stall the batch). Phase B adds only the run-context
+// wrapper (checkpointing) around the same call.
+async function executeInline(item, { timeoutMs = 300000 } = {}) {
   const { agent, agentId, text, channel, m } = item;
-  // Pass message ts so agent can reply in thread (fixes "0 replies" bug
-  // where agents posted top-level instead of in the directive thread)
-  //
-  // TIMEOUT (Oct 4, 2026 — CEO fix, raised Oct 5): Agent LLM calls can hang.
-  // 180s because delegations chain (CMO → CCO → execPM); each hop takes
-  // 15-30s. Concurrent execution means a longer per-delegation timeout
-  // doesn't stall the batch.
-  const result = await Promise.race([
-    agent.handleDelegation(text, new Set(), channel, m.ts),
-    new Promise((_, reject) =>
-      setTimeout(() => reject(new Error(`Agent ${agentId} timed out after 180s`)), 180000)
-    ),
-  ]).catch(e => {
+  const { runWithRunContext } = require('./runContext');
+  const { directiveRunId } = require('./directiveWorkflow');
+  let timer = null;
+  const result = await runWithRunContext(
+    { runId: directiveRunId(channel, m.ts), checkpointStore: getDurableCheckpointStore() },
+    () => Promise.race([
+      agent.handleDelegation(text, new Set(), channel, m.ts),
+      new Promise((_, reject) => {
+        timer = setTimeout(
+          () => reject(new Error(`Agent ${agentId} timed out after ${Math.round(timeoutMs / 1000)}s`)),
+          timeoutMs
+        );
+      }),
+    ])
+  ).catch(e => {
     console.error(`[directivePoll] ${agentId} delegation failed/timed out:`, e.message);
     return null; // Treat as failure, don't block the batch
-  });
+  }).finally(() => { if (timer) clearTimeout(timer); });
   return result;
 }
 
-// Validate one delegation result, post the reply, update task/state.
-// Runs serially in original message order. Returns 1 if the directive was
-// resolved (posted or dead-lettered), 0 if it will retry next cycle.
-async function finalizeDelegation(client, state, item, result) {
+// Workflow execution: register the directive and await the engine's
+// settlement of its intake record. Returns the step's result, or null
+// when the run failed or did not settle within the wait — null feeds
+// the same retry machinery as an inline failure.
+async function executeViaWorkflow(item, { timeoutMs = 300000, pollMs = 1000 } = {}) {
   const { channel, m, text, msgTs, agentId } = item;
-  let processed = 0;
-
-  if (!result) {
-    console.log(`[directivePoll] ${agentId} produced no result — skipping (will retry next cycle)`);
-    // HEALTH: Null result (timeout/error) counts as a failure
-    updateAgentHealth(agentId, 'failed');
-    return processed;
-  }
-
-  // ROOT-CAUSE FIX: Poller is the sole poster. Agents return content,
-  // poller validates BEFORE posting. This prevents empty "on it"
-  // messages from ever reaching Slack.
-
-  // Validate the response content for verifiable evidence.
-  // EVIDENCE FIX (Oct 5, 2026): Check sub-results too. When CMO delegates
-  // to CCO via relay(), the actual deliverable (copy, links) lives in the
-  // sub-result, not the CMO's wrapper response. Gating only on the main
-  // response discarded completed sub-agent work and left CMO/CUXO at
-  // 0 completions.
-  function hasVerifiableEvidenceIn(text, evidence) {
-    return /https?:\/\/[^\s]+/.test(text) ||  // URL
-      /\b\d{15,20}\b/.test(text) ||             // Post ID
-      /\b\d+\s*(likes|views|clicks|signups|comments|shares)\b/i.test(text) || // Metrics
-      (evidence && !evidence.includes('Posted response')); // Real tool evidence
-  }
-
-  const responseText = result?.response || '';
-  let hasVerifiableEvidence = hasVerifiableEvidenceIn(responseText, result?.evidence);
-
-  // Check sub-agent results for evidence (the actual deliverable often lives here)
-  const subResultsForEvidence = (result.subResults && Array.isArray(result.subResults))
-    ? result.subResults
-    : [];
-  for (const sub of subResultsForEvidence) {
-    if (!sub.result) continue;
-    if (hasVerifiableEvidenceIn(sub.result.response || '', sub.result.evidence)) {
-      hasVerifiableEvidence = true;
-      break;
+  const intake = getIntakeStore();
+  const { directiveRunId } = require('./directiveWorkflow');
+  const key = `${channel}:${m.ts}`;
+  await intake.register({
+    channel, ts: m.ts, msgTs, agentId, text,
+    checkpointRunId: directiveRunId(channel, m.ts),
+  });
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    const rec = await intake.get(key);
+    if (rec && rec.status === 'completed') return rec.result === undefined ? null : rec.result;
+    if (rec && rec.status === 'failed') {
+      console.error(`[directivePoll] ${agentId} directive-work run failed: ${rec.error || 'unknown error'}`);
+      return null;
     }
-    if (sub.result.taskId || sub.result.evidence) {
-      hasVerifiableEvidence = true;
-      break;
+    if (Date.now() >= deadline) {
+      console.error(`[directivePoll] ${agentId} directive-work run did not settle within ${Math.round(timeoutMs / 1000)}s — leaving it to the retry machinery (no inline re-execution)`);
+      return null;
     }
+    await new Promise(r => setTimeout(r, pollMs));
   }
+}
 
-  // ENFORCE EVIDENCE CONTRACT: Agents must return evidence of work done.
-  // For action directives (publish, send, launch, create), text replies are
-  // NOT sufficient — must show tool execution with IDs/links/counts.
-  const lowerText = text.toLowerCase();
-  const requiresAction = /publish|send|launch|create|post to|execute/.test(lowerText);
-
-  let hasEvidence = hasVerifiableEvidence || (result && (result.taskId || result.evidence));
-
-  // Sub-result task/evidence also counts (e.g. CCO created a task or ran a tool)
-  if (!hasEvidence) {
-    for (const sub of subResultsForEvidence) {
-      if (sub.result && (sub.result.taskId || sub.result.evidence)) {
-        hasEvidence = true;
-        break;
-      }
-    }
-  }
-
-  // For action directives, require tool execution evidence specifically
-  if (requiresAction && !hasVerifiableEvidence) {
-    console.log(`[directivePoll] ${agentId} action directive lacks verifiable evidence — NOT posting`);
-    hasEvidence = false;
-  }
-
-  if (!hasEvidence) {
-    console.log(`[directivePoll] ${agentId} provided no evidence — directive NOT marked complete`);
-
-    // ROOT-CAUSE FIX: Track retry counts. Infinite retry without evidence
-    // spams the channel with "on it" messages. After 3 failures, dead-letter
-    // the directive (advance watermark) and log for human review.
-    const retryKey = `${channel}:${m.ts}`;
-    const retries = (state._retries || {})[retryKey] || 0;
-
-    if (retries >= 3) {
-      console.log(`[directivePoll] ${agentId} directive failed 3x — dead-lettering (advancing watermark)`);
-      if (!state._deadLetter) state._deadLetter = [];
-      state._deadLetter.push({
-        channel, ts: m.ts, agentId,
-        text: text.slice(0, 200),
-        failedAt: new Date().toISOString(),
-        reason: 'no_evidence_after_3_retries',
-      });
-      // Advance watermark to prevent infinite loop
-      if (msgTs > parseFloat(state[channel] || '0')) state[channel] = m.ts;
-      // Clear retry count
-      if (state._retries) delete state._retries[retryKey];
-      // HEALTH: Dead-letter after 3 no-evidence retries = failure
-      updateAgentHealth(agentId, 'failed');
-    } else {
-      // Increment retry count, do NOT advance watermark (will retry)
-      if (!state._retries) state._retries = {};
-      state._retries[retryKey] = retries + 1;
-      console.log(`[directivePoll] Retry ${retries + 1}/3 for ${agentId} directive`);
-    }
-    return processed;
-  }
-
-  processed++;
-
-  // ROOT-CAUSE FIX: Poller posts the validated response.
-  // Agents return content, poller validates, THEN posts.
-  // This is the only place directive replies are posted.
-  if (result?.response) {
-    try {
-      // ROOT-CAUSE FIX (Oct 6, 2026): ALWAYS post directive replies in the
-      // directive's channel. The agent's primaryChannel (e.g. CCO's "content")
-      // is for proactive posts, not directive replies. Using it here posted
-      // to the wrong channel, where the thread_ts didn't exist.
-      const channelId = channel;
-      const postParams = {
-        channel: channelId,
-        text: result.response,
-        unfurl_links: false,
-      };
-      // Reply in thread if threadTs provided
-      if (result.threadTs) {
-        postParams.thread_ts = result.threadTs;
-      }
-      // Use the agent's identity for the post
-      const { AGENTS } = require('../config');
-      const agentCfg = AGENTS[agentId];
-      if (agentCfg?.slackName) postParams.username = agentCfg.slackName;
-      if (agentCfg?.icon) postParams.icon_emoji = agentCfg.icon;
-
-      const postRes = await client.chat.postMessage(postParams);
-      const postedTs = postRes && postRes.ts;
-
-      // VERIFY (Oct 6, 2026): Read back the thread/channel and confirm the
-      // post landed. Fail closed — do not mark complete on unverified posts.
-      const landed = await verifyPostLanded(client, channelId, result.threadTs, postedTs);
-      if (!landed) {
-        console.error(`[directivePoll] ❌ Post verification FAILED for ${agentId} — ` +
-          `posted ts ${postedTs || '(none)'} not found in ${result.threadTs ? 'thread' : 'channel'}. ` +
-          `Directive NOT marked complete (will retry).`);
-        updateAgentHealth(agentId, 'failed');
-        return processed;
-      }
-      console.log(`[directivePoll] ✅ Posted validated reply for ${agentId} in ${result.threadTs ? 'thread' : 'channel'} (verified ts ${postedTs})`);
-    } catch (postErr) {
-      console.error(`[directivePoll] Failed to post validated reply:`, postErr.message);
-      updateAgentHealth(agentId, 'failed');
-      return processed;
-    }
-  }
-
-  if (msgTs > parseFloat(state[channel] || '0')) state[channel] = m.ts;
-
-  // HEALTH: Validated evidence posted = completed delivery
-  updateAgentHealth(agentId, 'completed');
-
-  // POST SUB-AGENT RESULTS (Oct 4, 2026 — poller is sole poster):
-  // Sub-delegations return content via relay(). The poller validates
-  // and posts each one. Sub-agents never post directly.
-  if (result.subResults && Array.isArray(result.subResults)) {
-    for (const sub of result.subResults) {
-      if (!sub.result || !sub.result.response) continue;
-      const subAgentId = sub.agentId;
+async function executeDelegation(item, opts = {}) {
+  if (workflowModeEnabled()) {
+    let intake = null;
+    try { intake = getIntakeStore(); } catch { intake = null; }
+    if (intake && intake.heartbeatFresh(DIRECTIVE_WORKFLOW_HEARTBEAT_MAX_AGE_MS)) {
       try {
-        const subPostParams = {
-          channel: channel,
-          text: sub.result.response,
-          unfurl_links: false,
-        };
-        if (sub.result.threadTs) subPostParams.thread_ts = sub.result.threadTs;
-        await client.chat.postMessage(subPostParams);
-        console.log(`[directivePoll] ✅ Posted sub-agent reply for ${subAgentId}`);
-        updateAgentHealth(subAgentId, 'completed');
-      } catch (subErr) {
-        console.error(`[directivePoll] Failed to post sub-agent reply for ${subAgentId}:`, subErr.message);
-        updateAgentHealth(subAgentId, 'failed');
+        return await executeViaWorkflow(item, opts);
+      } catch (e) {
+        // Registration/read failures mean no run can have started —
+        // safe to fall back inline. (Post-registration failures resolve
+        // to null inside executeViaWorkflow and never reach here.)
+        console.error(`[directivePoll] workflow path unavailable for ${item.agentId} (${e.message}) — falling back to inline execution`);
+        try {
+          logEngineGap('directive_workflow_fallback', `${item.agentId} directive fell back to inline execution: ${e.message}`, 'directivePoll');
+        } catch { /* gap logging must never break the batch */ }
       }
+    } else {
+      console.log(`[directivePoll] directive engine heartbeat stale — executing ${item.agentId} inline (workflow path unavailable)`);
     }
   }
+  return executeInline(item, opts);
+}
 
-  // AUTO-LINK (Oct 4, 2026 — CEO fix): Every directive automatically
-  // updates the agent's Vikunja task with the directive and response.
-  // This unifies Slack and Vikunja — staleness becomes impossible
-  // because the directive IS the task update.
-  await linkDirectiveToTask(agentId, text, result?.response || result?.evidence).catch(e =>
-    console.error(`[directivePoll] Auto-link failed for ${agentId}:`, e.message));
-  // Queue for verification: the outcome will be checked by directiveVerify.js
-  // against EXTERNAL systems (not just Slack text). This ensures "on it"
-  // replies aren't mistaken for completed work.
-  queueForVerification(text, agentId, result);
-  // Suggest collaboration: if this directive overlaps with another agent's work,
-  // connect them directly so they work like a real team.
-  await suggestCollaboration(text, agentId).catch(e =>
-    console.error(`[directivePoll] collaboration suggestion failed:`, e.message));
-
-  return processed;
+// Execute one agent delegation. Kept as the batch runner's entry point;
+// the Phase B path selection lives in executeDelegation above.
+async function runDelegation(item) {
+  return executeDelegation(item);
 }
 
 async function main() {
@@ -560,6 +352,47 @@ async function main() {
 
   const state = loadState();
   let processed = 0;
+
+  // PHASE F (Vikunja #789) — fallback-only mode. With
+  // MACF_ENGINE_INTAKE=1 the engine owns scanning, registration and
+  // finalization (engine/directiveScan.js runIntakeCycle, driven by a
+  // Hatchet cron trigger). This poller then only acts when the engine
+  // is down: fresh heartbeat → stand down (a second worker double-posts);
+  // stale heartbeat → record the fallback activation (it breaks the
+  // retirement streak), adopt whatever the dead engine left in the
+  // intake, finalize its settled records through the shared machinery,
+  // and run the full legacy cycle below until the engine returns.
+  let phaseFFallbackActive = false;
+  if (process.env.MACF_ENGINE_INTAKE === '1') {
+    let heartbeatFresh = false;
+    try { heartbeatFresh = getIntakeStore().heartbeatFresh(DIRECTIVE_WORKFLOW_HEARTBEAT_MAX_AGE_MS); }
+    catch { heartbeatFresh = false; }
+    if (phaseFFallbackDecision({ engineIntakeFlag: true, heartbeatFresh }) === 'noop') {
+      console.log('[directivePoll] Phase F: engine intake active (fresh heartbeat) — poller standing down (fallback-only mode)');
+      return;
+    }
+    phaseFFallbackActive = true;
+    console.log('[directivePoll] Phase F: engine heartbeat stale — FALLBACK cycle (poller resuming full duty until the engine returns)');
+    try {
+      const { createRetirementTracker } = require('./directiveRetirement');
+      createRetirementTracker().recordFallbackActivation('engine heartbeat stale at poller cycle');
+    } catch (e) {
+      console.error('[directivePoll] Phase F: retirement fallback recording failed:', e.message);
+    }
+    try {
+      const intake = getIntakeStore();
+      const adopted = await directiveFinalize.adoptOrphanedIntakeRecords({ intake });
+      if (adopted.forceFailed) {
+        console.log(`[directivePoll] Phase F fallback: adopted ${adopted.forceFailed} orphaned intake record(s) left by the dead engine`);
+      }
+      const consumed = await directiveFinalize.consumeSettledIntakeRecords({ intake, state, client });
+      if (consumed.consumed) {
+        console.log(`[directivePoll] Phase F fallback: finalized ${consumed.consumed} settled intake record(s)`);
+      }
+    } catch (e) {
+      console.error('[directivePoll] Phase F fallback adoption/consume failed:', e.message);
+    }
+  }
   // CONCURRENCY (Oct 5, 2026): routable directives queue here during the
   // channel scan; their slow agent delegations run concurrently afterwards.
   const pendingDelegations = [];
@@ -589,6 +422,16 @@ async function main() {
   } catch (e) {
     console.error('[directivePoll] delegation wiring failed:', e.message);
   }
+
+  // RETRY-QUEUE DRAIN (Oct 11, 2026): directives scanned but not resolved
+  // (garbled output, null result, batch-cap drop, finalize throw) are
+  // re-queued here from state._pendingRetry, INDEPENDENT of the watermark —
+  // the scan-phase watermark may already have advanced past them.
+  // AUTO-REQUEUE (Oct 15, 2026): dead-lettered directives whose cooldown has
+  // elapsed drain FIRST (they are the oldest outstanding work), then the
+  // regular retry queue.
+  drainDeadLetterRequeues(state, client, pendingDelegations);
+  drainPendingRetry(state, client, pendingDelegations);
 
   for (const channel of CHANNELS) {
     const lastTs = state[channel] || '0';
@@ -655,12 +498,14 @@ async function main() {
             }
             const roadblockMsg = `[from: ${agentName} → Exec PM] CAPABILITY REQUEST: ${need}`;
             console.log(`[directivePoll] Routing roadblock to execPM for capability matching`);
-            await Promise.race([
-              execPMAgent.handleDelegation(roadblockMsg, new Set(), channel, m.ts),
-              new Promise((_, reject) =>
-                setTimeout(() => reject(new Error('execPM roadblock handler timed out')), 60000)
-              ),
-            ]).catch(e => console.error(`[directivePoll] execPM roadblock routing failed:`, e.message));
+            // Phase B (Vikunja #789): roadblocks ride the same execution
+            // entry point as directives — workflow path when enabled,
+            // inline otherwise — so no directive-path execution happens
+            // outside it (US-B1.2 coverage).
+            await executeDelegation(
+              { channel, m: { ts: m.ts }, text: roadblockMsg, msgTs, agentId: 'execPM', agent: execPMAgent },
+              { timeoutMs: 60000 }
+            ).catch(e => console.error(`[directivePoll] execPM roadblock routing failed:`, e.message));
           }
         } catch (e) {
           console.error(`[directivePoll] Roadblock routing error:`, e.message);
@@ -675,14 +520,20 @@ async function main() {
       // ROOT-CAUSE FIX: Match any inter-agent delegation, not just CEO.
       // ExecPM and other agents delegate using [from: X → Y] format.
       // The old regex only matched CEO, so sub-delegations were silently dropped.
-      const dm = text.match(/\[from:\s*(.+?)\s*→\s*(.+?)\]/i);
+      const dm = parseDelegationHeader(text);
       if (!dm) {
+        // LOUD near-miss (Oct 15, 2026): a message that looks like a
+        // delegation but does not parse must never be dropped silently —
+        // that silence hid the ASCII-arrow routing failure for hours.
+        if (/\[from:/i.test(text)) {
+          console.log(`[directivePoll] ⚠ NEAR-MISS: unparseable delegation header (check arrow/format): "${text.slice(0, 100)}"`);
+        }
         // Non-directive: safe to mark as seen immediately.
         if (msgTs > parseFloat(state[channel] || '0')) state[channel] = m.ts;
         continue;
       }
-      const fromName = dm[1].trim();
-      const toNameRaw = dm[2].trim();
+      const fromName = dm.from;
+      const toNameRaw = dm.to;
       // Only route if the target is a known agent (prevents matching random text)
       const toName = toNameRaw.toLowerCase().replace(/[\s-]+/g, '');
       const agentId = DELEGATION_TARGETS[toName];
@@ -704,8 +555,47 @@ async function main() {
         continue;
       }
       console.log(`[directivePoll] routing to ${agentId}: "${text.slice(0, 80)}"`);
-      // HEALTH: Track that this agent received a directive
-      updateAgentHealth(agentId, 'received');
+      // HEALTH (Oct 6, 2026 — root-cause fix): count 'received' ONCE per
+      // unique directive. The watermark does not advance on evidence-gate
+      // retries or batch-cap drops, so the same directive was re-scanned
+      // every 5-min cycle and re-counted — inflating directivesReceived
+      // (e.g. CMO 264 received vs 90 terminal outcomes) and systematically
+      // depressing the delivery rate the self-healer checks against 50%.
+      const directiveKey = `${channel}:${m.ts}`;
+      if (!Array.isArray(state._receivedDirectives)) state._receivedDirectives = [];
+      if (!state._receivedDirectives.includes(directiveKey)) {
+        updateAgentHealth(agentId, 'received');
+        state._receivedDirectives.push(directiveKey);
+        // Bound the dedupe set: completed/dead-lettered directives advance
+        // the watermark and can never reappear, so only recent keys matter.
+        if (state._receivedDirectives.length > 500) {
+          state._receivedDirectives = state._receivedDirectives.slice(-500);
+        }
+      }
+      // ARTIFACT VALIDATION (Oct 6, 2026 — Jesse: "Always fix it"):
+      // If a directive asks to review/analyze/check specific artifacts
+      // (PDFs, documents, templates, files) but provides no URLs or paths,
+      // it's unactionable. Dead-letter immediately instead of wasting 3 retries.
+      const artifactKeywords = /\b(pdfs?|documents?|templates?|files?|spreadsheets?|images?|videos?|designs?|mockups?|wireframes?)\b/i;
+      const reviewKeywords = /\b(review|analyze|check|verify|audit|inspect|examine|look at)\b/i;
+      const hasUrl = /https?:\/\/[^\s]+/i.test(text);
+      const hasPath = /(?:\/[\w.-]+)+\.\w+/.test(text) || /\b[\w-]+\.(pdf|docx?|xlsx?|png|jpe?g)\b/i.test(text);
+      if (artifactKeywords.test(text) && reviewKeywords.test(text) && !hasUrl && !hasPath) {
+        console.log(`[directivePoll] ${agentId} directive references artifacts but provides no URLs/paths — dead-lettering as unactionable`);
+        if (!state._deadLetter) state._deadLetter = [];
+        state._deadLetter.push({
+          channel, ts: m.ts, agentId,
+          text: text.slice(0, 200),
+          // #807 US-P3.2: full text on every dead-letter entry (the main
+          // failure path already stores it; this intake path did not).
+          fullText: text.slice(0, 4000),
+          failedAt: new Date().toISOString(),
+          reason: 'missing_artifacts',
+        });
+        if (msgTs > parseFloat(state[channel] || '0')) state[channel] = m.ts;
+        updateAgentHealth(agentId, 'failed');
+        continue;
+      }
       // CONCURRENCY (Oct 5, 2026): Don't await the delegation inline —
       // queue it for the concurrent batch after the scan. The slow LLM
       // call runs in parallel with the other directives' calls.
@@ -722,12 +612,38 @@ async function main() {
   // 5-min cron window. Cap at 8 per run (highest priority first); the rest
   // wait for the next cycle. Watermarks only advance for processed items,
   // so unprocessed directives are safely retried.
+  // PHASE F fallback bookkeeping: a directive this fallback cycle has
+  // to route that was posted long before the engine died was missed by
+  // the engine-side scan — record it against the retirement streak
+  // (the zero-missed bar in the CEO's Phase F retirement decision).
+  if (phaseFFallbackActive) {
+    try {
+      const { createRetirementTracker } = require('./directiveRetirement');
+      const tracker = createRetirementTracker();
+      const staleBeforeMs = Date.now() - 10 * 60 * 1000;
+      for (const item of pendingDelegations) {
+        if (!item.isRetry && (item.msgTs || 0) * 1000 < staleBeforeMs) {
+          tracker.recordMissedDirective({ channel: item.channel, ts: item.m.ts });
+          console.log(`[directivePoll] Phase F fallback: directive ${item.channel}:${item.m.ts} predates the engine outage — recorded as missed`);
+        }
+      }
+    } catch (e) {
+      console.error('[directivePoll] Phase F: retirement missed-directive recording failed:', e.message);
+    }
+  }
+
   const MAX_BATCH = 6;
   if (pendingDelegations.length > MAX_BATCH) {
     // Sort by priority (same logic as mapWithConcurrency) so the cap keeps
     // the highest-priority work
     pendingDelegations.sort((a, b) => getDirectivePriority(a) - getDirectivePriority(b));
-    console.log(`[directivePoll] batch capped: ${pendingDelegations.length} → ${MAX_BATCH} (highest priority first, rest next cycle)`);
+    console.log(`[directivePoll] batch capped: ${pendingDelegations.length} → ${MAX_BATCH} (highest priority first, rest queued for retry)`);
+    // Retry-queue the dropped items: the scan-phase watermark may already
+    // have advanced past them, so "rest next cycle" is not guaranteed
+    // without the explicit queue.
+    for (const dropped of pendingDelegations.slice(MAX_BATCH)) {
+      queueRetry(state, dropped);
+    }
     pendingDelegations.length = MAX_BATCH;
   }
   if (pendingDelegations.length > 0) {
@@ -743,7 +659,9 @@ async function main() {
       if (!dr.ok) {
         console.error(`[directivePoll] ${item.agentId} delegation threw:`, dr.error?.message);
         updateAgentHealth(item.agentId, 'failed');
-        // Do NOT advance state — retry this directive on the next run.
+        // Retry-queue: the scan-phase watermark may already be past this
+        // directive, so re-scanning is not guaranteed.
+        queueRetry(state, item);
         continue;
       }
       try {
@@ -751,9 +669,24 @@ async function main() {
       } catch (e) {
         console.error(`[directivePoll] ${item.agentId} finalize failed:`, e.message);
         updateAgentHealth(item.agentId, 'failed');
-        // Do NOT advance state — retry this directive on the next run.
+        // Retry-queue: the scan-phase watermark may already be past this
+        // directive, so re-scanning is not guaranteed.
+        queueRetry(state, item);
       }
     }
+  }
+
+  // ZERO-CYCLE ALARM (Oct 12, 2026 — CEO mechanism repair): a cycle that had
+  // delegations to run and processed none means the model path failed
+  // end-to-end. That used to surface only as a log line hours later.
+  if (processed === 0 && pendingDelegations.length > 0) {
+    try {
+      logEngineGap(
+        'directive_cycle_zero',
+        `Directive cycle processed 0 of ${pendingDelegations.length} delegation(s) — model path failure suspected; see llm-canary state`,
+        'directivePoll'
+      );
+    } catch {}
   }
 
   saveState(state);
@@ -795,10 +728,17 @@ function releaseLock() {
 process.on('exit', releaseLock);
 process.on('SIGTERM', () => { releaseLock(); process.exit(0); });
 
-if (!acquireLock()) {
-  process.exit(0);
+// TEST-SAFE (Oct 11, 2026): main() runs only when executed directly, so
+// require()ing this module for unit tests has no side effects (no lock,
+// no Slack calls, no state mutation).
+if (require.main === module) {
+  if (!acquireLock()) {
+    process.exit(0);
+  }
+  main().then(() => {
+    // Explicit exit: WebClient and fetch leave open handles that prevent natural exit.
+    process.exit(0);
+  }).catch(e => { console.error('[directivePoll] fatal:', e.message); process.exit(1); });
 }
-main().then(() => {
-  // Explicit exit: WebClient and fetch leave open handles that prevent natural exit.
-  process.exit(0);
-}).catch(e => { console.error('[directivePoll] fatal:', e.message); process.exit(1); });
+
+module.exports = { queueRetry, dropPendingRetry, drainPendingRetry, drainDeadLetterRequeues, recordRetryFailure, MAX_PENDING_RETRY, REQUEUE_COOLDOWN_MS, MAX_REQUEUES, linkDirectiveToTask, finalizeDelegation, hasVerifiableEvidenceIn, countToolReceiptsSince, sanitizePostText, parseDelegationHeader, executeDelegation, executeInline, executeViaWorkflow, workflowModeEnabled, phaseFFallbackDecision, __setIntakeStoreForTest };
