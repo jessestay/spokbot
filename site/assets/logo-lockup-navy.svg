@@ -1,0 +1,52 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 743 164" role="img" aria-labelledby="lt">
+  <title id="lt">Spokbot logo — mascot with wordmark (for light backgrounds)</title>
+  <!-- Spokbot logo, lockup treatment: mascot mark at left, SPOKBOT
+       wordmark beside it. Mascot artwork verbatim from mascot.svg.
+       Wordmark: site font stack, weight 800 (style.css .logo). -->
+    <g transform="translate(-19.05 -10.18) scale(0.7812)">
+<defs>
+    <clipPath id="logoHeadClip">
+      <rect x="58" y="92" width="124" height="118" rx="30"/>
+    </clipPath>
+  </defs>
+<!-- pointed fin ears, behind the head -->
+  <path d="M62 208 C50 150 40 84 34 28 C58 58 84 92 98 122 C88 156 76 184 62 208 Z"
+        fill="#4FAFB2" stroke="#14264C" stroke-width="9" stroke-linejoin="round"/>
+  <path d="M178 208 C190 150 200 84 206 28 C182 58 156 92 142 122 C152 156 164 184 178 208 Z"
+        fill="#4FAFB2" stroke="#14264C" stroke-width="9" stroke-linejoin="round"/>
+  <!-- antenna -->
+  <path d="M120 100 L120 56" stroke="#14264C" stroke-width="10" stroke-linecap="round"/>
+  <circle cx="120" cy="40" r="18" fill="#14264C"/>
+  <circle cx="120" cy="40" r="9" fill="#F97362"/>
+  <!-- head -->
+  <rect x="58" y="92" width="124" height="118" rx="30"
+        fill="#4FAFB2" stroke="#14264C" stroke-width="9"/>
+  <!-- fringe band, clipped to the head: straight dark hairline across the top -->
+  <g clip-path="url(#logoHeadClip)">
+    <path d="M52 84 L188 84 L188 106 Q120 112 52 106 Z" fill="#14264C"/>
+  </g>
+  <!-- chin band, clipped to the head -->
+  <g clip-path="url(#logoHeadClip)">
+    <path d="M52 180 Q120 167 188 180 L188 216 L52 216 Z" fill="#F6EFDB"/>
+    <path d="M52 180 Q120 167 188 180" fill="none" stroke="#14264C" stroke-width="8"/>
+    <circle cx="84" cy="194" r="6" fill="#F97362"/>
+  </g>
+  <!-- eyes: calm ovals -->
+  <ellipse cx="93" cy="140" rx="12" ry="17" fill="#F6EFDB"/>
+  <ellipse cx="147" cy="140" rx="12" ry="17" fill="#F6EFDB"/>
+  <ellipse cx="93" cy="141" rx="6" ry="10" fill="#14264C"/>
+  <ellipse cx="147" cy="141" rx="6" ry="10" fill="#14264C"/>
+  <!-- brows: arched, upswept toward the outer edges -->
+  <path d="M105 120 Q92 112 80 114" fill="none" stroke="#14264C" stroke-width="6" stroke-linecap="round"/>
+  <path d="M135 120 Q148 112 160 114" fill="none" stroke="#14264C" stroke-width="6" stroke-linecap="round"/>
+  <!-- mouth: restrained smile — calm, logical, warm -->
+  <path d="M105 160 Q120 170 135 160" fill="none" stroke="#14264C" stroke-width="7" stroke-linecap="round"/>
+</g>
+    <text x="206.90625" y="118" text-anchor="middle" font-family="'Helvetica Neue', Helvetica, Arial, sans-serif" font-size="100" font-weight="800" fill="#14264C">S</text>
+    <text x="283.90625" y="118" text-anchor="middle" font-family="'Helvetica Neue', Helvetica, Arial, sans-serif" font-size="100" font-weight="800" fill="#14264C">P</text>
+    <text x="366.40625" y="118" text-anchor="middle" font-family="'Helvetica Neue', Helvetica, Arial, sans-serif" font-size="100" font-weight="800" fill="#14264C">O</text>
+    <text x="451.40625" y="118" text-anchor="middle" font-family="'Helvetica Neue', Helvetica, Arial, sans-serif" font-size="100" font-weight="800" fill="#14264C">K</text>
+    <text x="533.40625" y="118" text-anchor="middle" font-family="'Helvetica Neue', Helvetica, Arial, sans-serif" font-size="100" font-weight="800" fill="#F97362">B</text>
+    <text x="618.40625" y="118" text-anchor="middle" font-family="'Helvetica Neue', Helvetica, Arial, sans-serif" font-size="100" font-weight="800" fill="#F97362">O</text>
+    <text x="703.40625" y="118" text-anchor="middle" font-family="'Helvetica Neue', Helvetica, Arial, sans-serif" font-size="100" font-weight="800" fill="#F97362">T</text>
+</svg>

@@ -1,8 +1,8 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 240 240" role="img" aria-labelledby="t d" style="color:#F6EFDB">
   <title id="t">Spokbot mascot, one-color light</title>
   <desc id="d">One-color (currentColor) version of the Spokbot mascot for dark backgrounds. Set the CSS color to recolor.</desc>
-  <!-- One-color variant: single evenodd path — silhouette with eyes, mouth,
-       chin-band line and antenna dot knocked out as true holes. -->
+  <!-- One-color variant: single evenodd path — silhouette with eyes, brows,
+       smile, fringe line, chin-band line and antenna dot knocked out as true holes. -->
   <path fill="currentColor" fill-rule="evenodd" d="
     M58 202 C44 150 32 84 28 20 C46 48 54 80 57 110 C57 142 57 172 58 202 Z
     M182 202 C196 150 208 84 212 20 C194 48 186 80 183 110 C183 142 183 172 182 202 Z
@@ -12,7 +12,10 @@
     M81 140 a12 17 0 1 0 24 0 a12 17 0 1 0 -24 0 Z
     M135 140 a12 17 0 1 0 24 0 a12 17 0 1 0 -24 0 Z
     M111 40 a9 9 0 1 0 18 0 a9 9 0 1 0 -18 0 Z
-    M105 165 Q120 171 135 165 Q120 173 105 165 Z
+    M104 163 Q120 168 136 163 Q120 176 104 163 Z
+    M64 104 Q120 110 176 104 L176 111 Q120 117 64 111 Z
+    M79 118 Q92 111 106 123 Q92 119 79 118 Z
+    M161 118 Q148 111 134 123 Q148 119 161 118 Z
     M66 176 Q120 166 174 176 L174 184 Q120 174 66 184 Z
   "/>
 </svg>

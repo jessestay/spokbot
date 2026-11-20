@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 240 240" role="img" aria-labelledby="t d">
   <title id="t">Spokbot mascot</title>
-  <desc id="d">An original friendly robot head with tall pointed fin ears and a single antenna.</desc>
+  <desc id="d">An original friendly robot head with tall pointed fin ears, a single antenna, arched brows, a straight fringe and a calm smile.</desc>
   <!-- Spokbot mascot — original character. Palette: navy outline, teal, cream, coral. -->
   <defs>
     <clipPath id="headClip">
@@ -19,6 +19,10 @@
   <!-- head -->
   <rect x="58" y="92" width="124" height="118" rx="30"
         fill="#4FAFB2" stroke="#14264C" stroke-width="9"/>
+  <!-- fringe band, clipped to the head: straight dark hairline across the top -->
+  <g clip-path="url(#headClip)">
+    <path d="M52 84 L188 84 L188 106 Q120 112 52 106 Z" fill="#14264C"/>
+  </g>
   <!-- chin band, clipped to the head -->
   <g clip-path="url(#headClip)">
     <path d="M52 180 Q120 167 188 180 L188 216 L52 216 Z" fill="#F6EFDB"/>
@@ -30,6 +34,9 @@
   <ellipse cx="147" cy="140" rx="12" ry="17" fill="#F6EFDB"/>
   <ellipse cx="93" cy="141" rx="6" ry="10" fill="#14264C"/>
   <ellipse cx="147" cy="141" rx="6" ry="10" fill="#14264C"/>
-  <!-- mouth: small, level, logical -->
-  <path d="M107 169 Q120 174 133 169" fill="none" stroke="#14264C" stroke-width="7" stroke-linecap="round"/>
+  <!-- brows: arched, upswept toward the outer edges -->
+  <path d="M105 120 Q92 112 80 114" fill="none" stroke="#14264C" stroke-width="6" stroke-linecap="round"/>
+  <path d="M135 120 Q148 112 160 114" fill="none" stroke="#14264C" stroke-width="6" stroke-linecap="round"/>
+  <!-- mouth: restrained smile — calm, logical, warm -->
+  <path d="M105 160 Q120 170 135 160" fill="none" stroke="#14264C" stroke-width="7" stroke-linecap="round"/>
 </svg>

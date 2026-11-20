@@ -59,6 +59,7 @@ header.top {
   text-transform: uppercase; color: var(--ink); text-decoration: none;
 }
 .logo .dot { color: var(--orange); }
+.logo-img { display: block; height: 2.25rem; width: auto; }
 nav.pills { display: flex; flex-wrap: wrap; gap: 0.5rem; margin-left: auto; }
 nav.pills a {
   text-decoration: none; color: #111;
