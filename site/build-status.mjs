@@ -70,6 +70,8 @@ export function buildStatusHtml({ root, outPath } = {}) {
   .card .n { font-size: 1.8rem; font-weight: 700; }
   .card .k { color: #555; font-size: 0.85rem; }
   table { border-collapse: collapse; width: 100%; font-size: 0.9rem; }
+  .tablewrap { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+  .tablewrap table { min-width: 44rem; }
   th, td { border-bottom: 1px solid #ddd; padding: 0.4rem 0.5rem; text-align: left; vertical-align: top; }
   th { border-bottom: 2px solid #999; }
   footer { color: #555; font-size: 0.85rem; margin-top: 2rem; }
@@ -97,12 +99,14 @@ hand; regenerate with <code>node site/build-status.mjs</code>.</p>
 </div>
 
 <h2>Stories</h2>
+<div class="tablewrap">
 <table>
   <thead><tr><th>ID</th><th>Story</th><th>Points</th><th>Status</th><th>Acceptance criteria</th><th>Test evidence</th></tr></thead>
   <tbody>
 ${rows}
   </tbody>
 </table>
+</div>
 
 <footer>Generated ${generated} by <code>site/build-status.mjs</code>
 from the registry and lint reports in this repository. Story
