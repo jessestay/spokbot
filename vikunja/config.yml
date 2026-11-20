@@ -1,0 +1,14 @@
+service:
+  interface: "127.0.0.1:3456"
+  secret: "REDACTED-ROTATED-SECRET"
+  rootpath: "/home/hatch/workspace/macf/vikunja"
+  enableregistration: true
+database:
+  type: "sqlite"
+  path: "/home/hatch/workspace/macf/vikunja/data/vikunja.db"
+cors:
+  enable: false
+files:
+  basepath: "/home/hatch/workspace/macf/vikunja/files"
+log:
+  path: "/home/hatch/workspace/macf/vikunja/logs/vikunja.log"
