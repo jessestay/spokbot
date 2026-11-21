@@ -65,6 +65,66 @@
       give itself an A. Ours isn't allowed to — so neither are we.</p>
     </div>
 
+    <section id="receipt">
+      <h2>Exhibit A <span class="accent">— A Real Receipt</span></h2>
+      <p>An AI agent that reviews project pages — text only, the way a search
+      engine reads — left this page a note: the copy says "receipts" again
+      and again, and not one actual receipt was on it. Fair. Here is one, in
+      full: a real mission — its order, its output, and its proof.</p>
+      <p>On <strong>November 19, 2026</strong>, the real Spokbot agent loop
+      ran a written directive end to end on a <strong>local model
+      alone</strong> — <span class="mono">qwen3:8b</span>, served by Ollama
+      on our own staging server, through a staging gateway whose config
+      contains only local legs. The run process carried no cloud credentials
+      and no network proxy, so there was no external model to fall back to,
+      silently or otherwise. Staging only: production was verified untouched
+      before and after the run.</p>
+      <h3>The order</h3>
+      <p class="mono">Using the fileWrite tool, create the file
+      "local-first-proof/memo.md" containing a short memo titled
+      "Local-First Proof Memo" with: (1) the date 2026-11-19, (2) a
+      statement that this memo was produced by an agent whose reasoning ran
+      entirely on a local model on the staging server, (3) one sentence on
+      why local-first inference matters for a self-hosted agent system.
+      After the fileWrite succeeds, reply with one short paragraph
+      confirming what you wrote and the exact path the tool returned.</p>
+      <h3>What came back</h3>
+      <p>The model's first routing attempt went to the local leg
+      (<span class="mono">macf-local-smart</span>); no fallback was engaged.
+      It issued a native <span class="mono">fileWrite</span> tool call, the
+      engine executed it, and the file it produced reads, in full:</p>
+      <pre>### Local-First Proof Memo
+**Date:** 2026-11-19
+This memo was produced by an agent whose reasoning ran entirely on a local model on the staging server.
+Local-first inference enables self-hosted agent systems to maintain data sovereignty, reduce dependency on external infrastructure, and ensure consistent performance without network latency.</pre>
+      <p>The agent's confirmation reply, verbatim: <em>"I created the file
+      "local-first-proof/memo.md" with the specified content. The memo
+      confirms the local-first proof with the date 2026-11-19, states the
+      reasoning ran on a local model, and explains that local-first
+      inference ensures data sovereignty and reliable performance for
+      self-hosted systems. The file was written to the sandbox path:
+      local-first-proof/memo.md."</em></p>
+      <h3>The proof</h3>
+      <p>Every tool call writes a receipt to a ledger. This mission's:</p>
+      <pre>receipt   rcpt_mwob3pf80a5dc9
+logged    2026-11-20T01:34:41.780Z (Nov 19, 6:34 p.m. MST)
+tool      fileWrite — status: ok
+artifact  local-first-proof/memo.md — 345 bytes
+sha256    67a9fd693ebeeb881376926ad4431c424a6256224f7c41cb44a3c28498e5d417</pre>
+      <p>The staging gateway logged exactly <strong>2</strong>
+      <span class="mono">POST /v1/chat/completions</span> requests for the
+      whole run — directive in, tool result back — both <strong>200
+      OK</strong>. The run's result record: <span class="mono">ok:
+      true</span>, 1 tool used, <strong>14 minutes 3 seconds</strong> end
+      to end.</p>
+      <p><strong>The honest verdict, as logged that day: correctness proven,
+      performance not.</strong> Fourteen minutes for a two-round directive
+      is usable, not fast — that is what a local 8B model costs on a
+      CPU-only box. And this was one directive in staging, not the full-day
+      soak; the soak is still ahead of us. Order, output, proof, and the
+      caveat — that's the whole receipt.</p>
+    </section>
+
     <section>
       <h2>The Prime Directive <span class="accent">— Never Fabricate</span></h2>
       <p>Every agent on this crew works under one standing order that outranks all
@@ -197,11 +257,11 @@
         <div class="card">
           <p class="rank">Proof passed — November 19, 2026</p>
           <h3>Local-first proof</h3>
-          <p>It has happened — at the agent-loop level: on November 19, 2026 the
-          real agent loop ran a directive end to end on a local model alone
-          (qwen3:8b) — native tool call executed, deliverable produced, receipt
-          logged. Correctness: proven. Performance: not yet — on this CPU-only
-          box each round took minutes. The full-day soak is still ahead of us.</p>
+          <p>It has happened — at the agent-loop level, on a local model
+          alone. The full mission is posted as
+          <a href="#receipt">Exhibit A</a>, near the top of this page:
+          the order, the output, and the receipt itself. The full-day
+          soak is still ahead of us.</p>
         </div>
       </div>
     </section>
