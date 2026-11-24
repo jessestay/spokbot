@@ -36,7 +36,10 @@ a:hover { color: var(--orange); }
 /* ---------- LCARS frame ---------- */
 .frame {
   display: grid;
-  grid-template-columns: 3.2rem 1fr;
+  /* minmax(0, 1fr), not plain 1fr: a 1fr track cannot shrink below the
+     min-content of .main, and the <pre> receipt blocks' long unwrapped
+     lines forced the whole page ~1,110px wide on phone screens. */
+  grid-template-columns: 3.2rem minmax(0, 1fr);
   min-height: 100vh;
 }
 
@@ -47,7 +50,7 @@ a:hover { color: var(--orange); }
   margin: 0.6rem 0 0.6rem 0.6rem;
 }
 
-.main { padding: 0 1.4rem 3rem 1.6rem; max-width: 68rem; }
+.main { padding: 0 1.4rem 3rem 1.6rem; max-width: 68rem; min-width: 0; }
 
 /* ---------- header / nav ---------- */
 header.top {
@@ -183,7 +186,7 @@ footer a { color: var(--peach); }
 footer .signoff { color: var(--peach); font-weight: 700; letter-spacing: 0.06em; font-size: 1rem; }
 
 @media (max-width: 40rem) {
-  .frame { grid-template-columns: 1.4rem 1fr; }
+  .frame { grid-template-columns: 1.4rem minmax(0, 1fr); }
   .main { padding: 0 1rem 2rem; }
   nav.pills { margin-left: 0; }
 }
